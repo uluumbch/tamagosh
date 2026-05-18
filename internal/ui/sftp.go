@@ -65,8 +65,10 @@ type SftpModel struct {
 	RemoteSelected map[string]bool
 	LocalFilter    string
 	RemoteFilter   string
-	LocalHistory   []string
-	RemoteHistory  []string
+	LocalHistory     []string
+	RemoteHistory    []string
+	LocalCursorMem   map[string]string
+	RemoteCursorMem  map[string]string
 	Filtering      bool
 	ShowHidden     bool
 	Active           Pane
@@ -103,18 +105,20 @@ const (
 
 func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string, bm *bookmark.Store, scope string) SftpModel {
 	m := SftpModel{
-		Client:         client,
-		LocalDir:       localDir,
-		RemoteDir:      remoteDir,
-		LocalSelected:  map[string]bool{},
-		RemoteSelected: map[string]bool{},
-		Active:         PaneLocal,
-		Width:          80,
-		Height:         24,
-		SortMode:       SortName,
-		SortAsc:        true,
-		Bookmark:       bm,
-		BookmarkScope:  scope,
+		Client:          client,
+		LocalDir:        localDir,
+		RemoteDir:       remoteDir,
+		LocalSelected:   map[string]bool{},
+		RemoteSelected:  map[string]bool{},
+		LocalCursorMem:  map[string]string{},
+		RemoteCursorMem: map[string]string{},
+		Active:          PaneLocal,
+		Width:           80,
+		Height:          24,
+		SortMode:        SortName,
+		SortAsc:         true,
+		Bookmark:        bm,
+		BookmarkScope:   scope,
 	}
 	m.refreshLocal()
 	m.refreshRemote()
@@ -149,8 +153,12 @@ func (m *SftpModel) refreshLocal() {
 	m.sortEntriesSlice(entries)
 	m.LocalEntries = entries
 	m.LocalSelected = map[string]bool{}
-	m.LocalCursor = 0
-	m.LocalScroll = 0
+	if m.LocalCursor >= len(entries) {
+		m.LocalCursor = 0
+	}
+	if m.LocalScroll >= len(entries) {
+		m.LocalScroll = 0
+	}
 }
 
 func (m *SftpModel) refreshRemote() {
@@ -166,8 +174,12 @@ func (m *SftpModel) refreshRemote() {
 	m.sortEntriesSlice(entries)
 	m.RemoteEntries = entries
 	m.RemoteSelected = map[string]bool{}
-	m.RemoteCursor = 0
-	m.RemoteScroll = 0
+	if m.RemoteCursor >= len(entries) {
+		m.RemoteCursor = 0
+	}
+	if m.RemoteScroll >= len(entries) {
+		m.RemoteScroll = 0
+	}
 }
 
 func (m SftpModel) sortEntriesSlice(entries []sftppkg.Entry) {
@@ -659,6 +671,57 @@ func (m *SftpModel) clearSelection() {
 	}
 }
 
+func (m *SftpModel) localGoto(newDir string, pushHistory bool) {
+	// remember the name under the cursor before leaving
+	vis := m.visible(PaneLocal)
+	if m.LocalCursor >= 0 && m.LocalCursor < len(vis) {
+		m.LocalCursorMem[m.LocalDir] = vis[m.LocalCursor].Name
+	}
+	if pushHistory {
+		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
+	}
+	m.LocalDir = newDir
+	m.LocalFilter = ""
+	m.LocalCursor = 0
+	m.LocalScroll = 0
+	m.refreshLocal()
+	if name, ok := m.LocalCursorMem[newDir]; ok {
+		newVis := m.visible(PaneLocal)
+		for i, e := range newVis {
+			if e.Name == name {
+				m.LocalCursor = i
+				break
+			}
+		}
+	}
+	m.clampScroll()
+}
+
+func (m *SftpModel) remoteGoto(newDir string, pushHistory bool) {
+	vis := m.visible(PaneRemote)
+	if m.RemoteCursor >= 0 && m.RemoteCursor < len(vis) {
+		m.RemoteCursorMem[m.RemoteDir] = vis[m.RemoteCursor].Name
+	}
+	if pushHistory {
+		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
+	}
+	m.RemoteDir = newDir
+	m.RemoteFilter = ""
+	m.RemoteCursor = 0
+	m.RemoteScroll = 0
+	m.refreshRemote()
+	if name, ok := m.RemoteCursorMem[newDir]; ok {
+		newVis := m.visible(PaneRemote)
+		for i, e := range newVis {
+			if e.Name == name {
+				m.RemoteCursor = i
+				break
+			}
+		}
+	}
+	m.clampScroll()
+}
+
 func (m *SftpModel) descend() {
 	vis := m.visible(m.Active)
 	if m.Active == PaneLocal {
@@ -669,10 +732,7 @@ func (m *SftpModel) descend() {
 		if !e.IsDir {
 			return
 		}
-		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
-		m.LocalDir = filepath.Join(m.LocalDir, e.Name)
-		m.LocalFilter = ""
-		m.refreshLocal()
+		m.localGoto(filepath.Join(m.LocalDir, e.Name), true)
 	} else {
 		if m.RemoteCursor >= len(vis) {
 			return
@@ -681,24 +741,15 @@ func (m *SftpModel) descend() {
 		if !e.IsDir {
 			return
 		}
-		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
-		m.RemoteDir = sftppkg.Join(m.RemoteDir, e.Name)
-		m.RemoteFilter = ""
-		m.refreshRemote()
+		m.remoteGoto(sftppkg.Join(m.RemoteDir, e.Name), true)
 	}
 }
 
 func (m *SftpModel) ascend() {
 	if m.Active == PaneLocal {
-		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
-		m.LocalDir = filepath.Dir(m.LocalDir)
-		m.LocalFilter = ""
-		m.refreshLocal()
+		m.localGoto(filepath.Dir(m.LocalDir), true)
 	} else {
-		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
-		m.RemoteDir = sftppkg.Parent(m.RemoteDir)
-		m.RemoteFilter = ""
-		m.refreshRemote()
+		m.remoteGoto(sftppkg.Parent(m.RemoteDir), true)
 	}
 }
 
@@ -709,18 +760,14 @@ func (m *SftpModel) navBack() bool {
 		}
 		prev := m.LocalHistory[len(m.LocalHistory)-1]
 		m.LocalHistory = m.LocalHistory[:len(m.LocalHistory)-1]
-		m.LocalDir = prev
-		m.LocalFilter = ""
-		m.refreshLocal()
+		m.localGoto(prev, false)
 	} else {
 		if len(m.RemoteHistory) == 0 {
 			return false
 		}
 		prev := m.RemoteHistory[len(m.RemoteHistory)-1]
 		m.RemoteHistory = m.RemoteHistory[:len(m.RemoteHistory)-1]
-		m.RemoteDir = prev
-		m.RemoteFilter = ""
-		m.refreshRemote()
+		m.remoteGoto(prev, false)
 	}
 	return true
 }
