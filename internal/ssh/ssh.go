@@ -14,9 +14,13 @@ func BuildCommand(c config.Connection, password string) (string, []string) {
 	if port == 0 {
 		port = 22
 	}
+	sshBin := "ssh"
+	if p, err := exec.LookPath("ssh"); err == nil {
+		sshBin = p
+	}
 	args := []string{
 		"-p", password,
-		"/usr/bin/ssh",
+		sshBin,
 		"-p", fmt.Sprintf("%d", port),
 		"-o", "StrictHostKeyChecking=accept-new",
 		fmt.Sprintf("%s@%s", c.User, c.Host),

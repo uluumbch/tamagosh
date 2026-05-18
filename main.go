@@ -54,9 +54,8 @@ func main() {
 }
 
 func preflight() error {
-	const sshPath = "/usr/bin/ssh"
-	if _, err := os.Stat(sshPath); err != nil {
-		return fmt.Errorf("%s not found — install OpenSSH client", sshPath)
+	if _, err := exec.LookPath("ssh"); err != nil {
+		return fmt.Errorf("ssh not found in PATH — install OpenSSH client")
 	}
 	if _, err := exec.LookPath("sshpass"); err != nil {
 		hint := "brew install hudochenkov/sshpass/sshpass  (macOS)"

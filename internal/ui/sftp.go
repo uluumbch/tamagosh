@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -40,12 +41,13 @@ type editorDoneMsg struct {
 
 type transferState struct {
 	BytesDone  atomic.Int64
-	BytesTotal int64
+	BytesTotal atomic.Int64
 	FileIdx    atomic.Int32
-	FileTotal  int32
+	FileTotal  atomic.Int32
 	FileName   atomic.Pointer[string]
 	Done       atomic.Bool
 	Err        atomic.Pointer[string]
+	Scanning   atomic.Bool
 	Refresh    Pane
 }
 
@@ -344,7 +346,7 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if errp := m.Transfer.Err.Load(); errp != nil {
 				m.Err = *errp
 			} else {
-				m.Info = fmt.Sprintf("copied %d file(s)", m.Transfer.FileTotal)
+				m.Info = fmt.Sprintf("copied %d file(s)", m.Transfer.FileTotal.Load())
 				m.clearSelection()
 				if m.Transfer.Refresh == PaneRemote {
 					m.refreshRemote()
@@ -760,9 +762,26 @@ type copyItem struct {
 	isDir   bool
 }
 
-func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64) {
+// safeRelPath rejects relative paths containing ".." segments or absolute paths.
+// Returns ("", false) for unsafe paths so the caller can skip without writing.
+func safeRelPath(rel string) (string, bool) {
+	if rel == "" || rel == "." {
+		return rel, true
+	}
+	if filepath.IsAbs(rel) {
+		return "", false
+	}
+	cleaned := filepath.Clean(rel)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64, int) {
 	var items []copyItem
 	var total int64
+	skipped := 0
 	for _, e := range targets {
 		if m.Active == PaneLocal {
 			base := filepath.Join(m.LocalDir, e.Name)
@@ -773,14 +792,21 @@ func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64)
 			}
 			_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
 				if err != nil {
+					skipped++
 					return nil
 				}
 				rel, rerr := filepath.Rel(m.LocalDir, p)
 				if rerr != nil {
+					skipped++
+					return nil
+				}
+				safe, ok := safeRelPath(rel)
+				if !ok {
+					skipped++
 					return nil
 				}
 				if d.IsDir() {
-					items = append(items, copyItem{relPath: rel, isDir: true})
+					items = append(items, copyItem{relPath: safe, isDir: true})
 					return nil
 				}
 				info, ierr := d.Info()
@@ -788,7 +814,7 @@ func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64)
 				if ierr == nil {
 					sz = info.Size()
 				}
-				items = append(items, copyItem{relPath: rel, size: sz})
+				items = append(items, copyItem{relPath: safe, size: sz})
 				total += sz
 				return nil
 			})
@@ -800,19 +826,27 @@ func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64)
 				continue
 			}
 			prefix := strings.TrimSuffix(m.RemoteDir, "/") + "/"
+			if m.RemoteDir == "" || m.RemoteDir == "/" {
+				prefix = "/"
+			}
 			_ = m.Client.Walk(base, func(p string, isDir bool, size int64) error {
 				rel := strings.TrimPrefix(p, prefix)
-				if isDir {
-					items = append(items, copyItem{relPath: rel, isDir: true})
+				safe, ok := safeRelPath(rel)
+				if !ok {
+					skipped++
 					return nil
 				}
-				items = append(items, copyItem{relPath: rel, size: size})
+				if isDir {
+					items = append(items, copyItem{relPath: safe, isDir: true})
+					return nil
+				}
+				items = append(items, copyItem{relPath: safe, size: size})
 				total += size
 				return nil
 			})
 		}
 	}
-	return items, total
+	return items, total, skipped
 }
 
 func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
@@ -820,22 +854,13 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 		return nil
 	}
 
-	items, totalBytes := m.expandCopyItems(targets)
-	if len(items) == 0 {
-		return nil
-	}
-
-	ts := &transferState{
-		BytesTotal: totalBytes,
-		FileTotal:  int32(len(items)),
-	}
-	first := items[0].relPath
-	ts.FileName.Store(&first)
+	ts := &transferState{}
 	if m.Active == PaneLocal {
 		ts.Refresh = PaneRemote
 	} else {
 		ts.Refresh = PaneLocal
 	}
+	ts.Scanning.Store(true)
 
 	m.Err = ""
 	m.Info = ""
@@ -846,9 +871,26 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 	client := m.Client
 	localDir := m.LocalDir
 	remoteDir := m.RemoteDir
-	queue := append([]copyItem{}, items...)
+	snap := *m
+	targetsCopy := append([]sftppkg.Entry{}, targets...)
 
 	go func() {
+		items, totalBytes, skipped := snap.expandCopyItems(targetsCopy)
+		if skipped > 0 {
+			msg := fmt.Sprintf("skipped %d unsafe/unreadable entries", skipped)
+			ts.Err.Store(&msg)
+		}
+		if len(items) == 0 {
+			ts.Done.Store(true)
+			return
+		}
+		ts.BytesTotal.Store(totalBytes)
+		ts.FileTotal.Store(int32(len(items)))
+		first := items[0].relPath
+		ts.FileName.Store(&first)
+		ts.Scanning.Store(false)
+
+		queue := items
 		for i, it := range queue {
 			name := it.relPath
 			ts.FileName.Store(&name)
@@ -859,12 +901,17 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 			var err error
 			if it.isDir {
 				if dir == PaneLocal {
-					err = client.Mkdir(sftppkg.Join(remoteDir, it.relPath))
+					target := sftppkg.Join(remoteDir, it.relPath)
+					if _, statErr := client.Stat(target); statErr == nil {
+						err = nil
+					} else {
+						err = client.Mkdir(target)
+					}
 				} else {
 					err = os.MkdirAll(filepath.Join(localDir, it.relPath), 0o755)
-				}
-				if err != nil && strings.Contains(err.Error(), "exists") {
-					err = nil
+					if errors.Is(err, fs.ErrExist) {
+						err = nil
+					}
 				}
 			} else if dir == PaneLocal {
 				src := filepath.Join(localDir, it.relPath)
@@ -963,24 +1010,32 @@ func (m SftpModel) View() string {
 	help := hints
 	if m.TransferActive && m.Transfer != nil {
 		done := m.Transfer.BytesDone.Load()
-		total := m.Transfer.BytesTotal
+		total := m.Transfer.BytesTotal.Load()
 		idx := m.Transfer.FileIdx.Load()
-		tot := m.Transfer.FileTotal
-		name := ""
-		if p := m.Transfer.FileName.Load(); p != nil {
-			name = *p
-		}
-		pct := 0
-		if total > 0 {
-			pct = int(done * 100 / total)
-			if pct > 100 {
-				pct = 100
+		tot := m.Transfer.FileTotal.Load()
+		if m.Transfer.Scanning.Load() {
+			name := "scanning…"
+			if p := m.Transfer.FileName.Load(); p != nil && *p != "" {
+				name = *p
 			}
+			help = StyleSelected.Render("scanning tree: "+name) + "\n" + help
+		} else {
+			name := ""
+			if p := m.Transfer.FileName.Load(); p != nil {
+				name = *p
+			}
+			pct := 0
+			if total > 0 {
+				pct = int(done * 100 / total)
+				if pct > 100 {
+					pct = 100
+				}
+			}
+			bar := transferBar(done, total, 24)
+			status := fmt.Sprintf("transferring %d/%d  %s  %d%%  %s/%s  %s",
+				idx, tot, bar, pct, humanSize(done), humanSize(total), truncateMiddle(name, 30))
+			help = StyleSelected.Render(status) + "\n" + help
 		}
-		bar := transferBar(done, total, 24)
-		status := fmt.Sprintf("transferring %d/%d  %s  %d%%  %s/%s  %s",
-			idx, tot, bar, pct, humanSize(done), humanSize(total), truncateMiddle(name, 30))
-		help = StyleSelected.Render(status) + "\n" + help
 	} else if m.Err != "" {
 		help = StyleError.Render(m.Err) + "\n" + help
 	} else if m.Info != "" {
@@ -1414,7 +1469,10 @@ func renderPromptBox(action, input string, width int) string {
 }
 
 func transferBar(done, total int64, width int) string {
-	if total <= 0 || width <= 0 {
+	if width <= 0 {
+		return ""
+	}
+	if total <= 0 {
 		return "[" + strings.Repeat("-", width) + "]"
 	}
 	filled := int(done * int64(width) / total)
@@ -1587,6 +1645,7 @@ func (m SftpModel) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.PromptAction = ""
 		m.PromptInput = ""
 		m.PromptInitial = ""
+		m.ConfirmTargets = nil
 		return m, nil
 	case tea.KeyEnter:
 		action := m.PromptAction
@@ -1730,16 +1789,20 @@ func (m *SftpModel) editCurrent() tea.Cmd {
 		return nil
 	}
 
-	editor := os.Getenv("VISUAL")
-	if editor == "" {
-		editor = os.Getenv("EDITOR")
+	candidates := []string{}
+	if v := os.Getenv("VISUAL"); v != "" {
+		candidates = append(candidates, v)
 	}
-	if editor == "" {
-		for _, candidate := range []string{"nvim", "vim", "nano", "vi"} {
-			if _, err := exec.LookPath(candidate); err == nil {
-				editor = candidate
-				break
-			}
+	if e := os.Getenv("EDITOR"); e != "" {
+		candidates = append(candidates, e)
+	}
+	candidates = append(candidates, "nvim", "vim", "nano", "vi")
+
+	editor := ""
+	for _, c := range candidates {
+		if _, err := exec.LookPath(c); err == nil {
+			editor = c
+			break
 		}
 	}
 	if editor == "" {
@@ -1773,13 +1836,19 @@ func (m *SftpModel) editCurrent() tea.Cmd {
 
 	client := m.Client
 	cmd := exec.Command(editor, localPath)
+	savedPath := localPath
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		if err != nil {
 			return editorDoneMsg{err: err, pane: pane, cleanup: cleanup}
 		}
 		if pane == PaneRemote {
 			if uerr := client.Upload(localPath, remotePath); uerr != nil {
-				return editorDoneMsg{err: uerr, pane: pane, cleanup: cleanup}
+				// preserve local edits so user can recover
+				return editorDoneMsg{
+					err:     fmt.Errorf("upload failed (edits kept at %s): %w", savedPath, uerr),
+					pane:    pane,
+					cleanup: "",
+				}
 			}
 		}
 		return editorDoneMsg{pane: pane, cleanup: cleanup}
@@ -1844,12 +1913,13 @@ func humanSize(b int64) string {
 	if b < unit {
 		return fmt.Sprintf("%d B", b)
 	}
+	suffixes := "KMGTPE"
 	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
+	for n := b / unit; n >= unit && exp < len(suffixes)-1; n /= unit {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), suffixes[exp])
 }
 
 func entryDetail(e sftppkg.Entry) string {

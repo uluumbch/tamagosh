@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Candratama/tamagosh/internal/config"
@@ -12,16 +13,23 @@ func TestBuildCommand(t *testing.T) {
 	if name != "sshpass" {
 		t.Fatalf("name=%q", name)
 	}
-	want := []string{"-p", "hunter2", "/usr/bin/ssh", "-p", "2255",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"candra@43.228.213.209"}
-	if len(args) != len(want) {
-		t.Fatalf("args len=%d want=%d (%v)", len(args), len(want), args)
+	if len(args) != 8 {
+		t.Fatalf("args len=%d want 8 (%v)", len(args), args)
 	}
-	for i := range want {
-		if args[i] != want[i] {
-			t.Fatalf("args[%d]=%q want=%q", i, args[i], want[i])
-		}
+	if args[0] != "-p" || args[1] != "hunter2" {
+		t.Fatalf("password arg wrong: %v", args[:2])
+	}
+	if !strings.HasSuffix(args[2], "ssh") {
+		t.Fatalf("ssh binary path doesn't end with 'ssh': %q", args[2])
+	}
+	if args[3] != "-p" || args[4] != "2255" {
+		t.Fatalf("port arg wrong: %v", args[3:5])
+	}
+	if args[5] != "-o" || args[6] != "StrictHostKeyChecking=accept-new" {
+		t.Fatalf("strict host key opt wrong: %v", args[5:7])
+	}
+	if args[7] != "candra@43.228.213.209" {
+		t.Fatalf("user@host wrong: %q", args[7])
 	}
 }
 
