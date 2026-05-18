@@ -53,6 +53,8 @@ type SftpModel struct {
 	RemoteSelected map[string]bool
 	LocalFilter    string
 	RemoteFilter   string
+	LocalHistory   []string
+	RemoteHistory  []string
 	Filtering      bool
 	ShowHidden     bool
 	Active           Pane
@@ -382,11 +384,16 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.RemoteCursor = len(vis) - 1
 			}
 			m.clampScroll()
-		case tea.KeyEnter:
+		case tea.KeyEnter, tea.KeyRight:
 			m.descend()
 			m.clampScroll()
 		case tea.KeyBackspace:
 			m.ascend()
+			m.clampScroll()
+		case tea.KeyLeft:
+			if !m.navBack() {
+				m.ascend()
+			}
 			m.clampScroll()
 		case tea.KeySpace:
 			m.toggleSelect()
@@ -494,6 +501,7 @@ func (m *SftpModel) descend() {
 		if !e.IsDir {
 			return
 		}
+		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
 		m.LocalDir = filepath.Join(m.LocalDir, e.Name)
 		m.LocalFilter = ""
 		m.refreshLocal()
@@ -505,6 +513,7 @@ func (m *SftpModel) descend() {
 		if !e.IsDir {
 			return
 		}
+		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
 		m.RemoteDir = sftppkg.Join(m.RemoteDir, e.Name)
 		m.RemoteFilter = ""
 		m.refreshRemote()
@@ -513,14 +522,39 @@ func (m *SftpModel) descend() {
 
 func (m *SftpModel) ascend() {
 	if m.Active == PaneLocal {
+		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
 		m.LocalDir = filepath.Dir(m.LocalDir)
 		m.LocalFilter = ""
 		m.refreshLocal()
 	} else {
+		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
 		m.RemoteDir = sftppkg.Parent(m.RemoteDir)
 		m.RemoteFilter = ""
 		m.refreshRemote()
 	}
+}
+
+func (m *SftpModel) navBack() bool {
+	if m.Active == PaneLocal {
+		if len(m.LocalHistory) == 0 {
+			return false
+		}
+		prev := m.LocalHistory[len(m.LocalHistory)-1]
+		m.LocalHistory = m.LocalHistory[:len(m.LocalHistory)-1]
+		m.LocalDir = prev
+		m.LocalFilter = ""
+		m.refreshLocal()
+	} else {
+		if len(m.RemoteHistory) == 0 {
+			return false
+		}
+		prev := m.RemoteHistory[len(m.RemoteHistory)-1]
+		m.RemoteHistory = m.RemoteHistory[:len(m.RemoteHistory)-1]
+		m.RemoteDir = prev
+		m.RemoteFilter = ""
+		m.refreshRemote()
+	}
+	return true
 }
 
 func (m *SftpModel) gatherTargets(filesOnly bool) []sftppkg.Entry {
@@ -695,7 +729,7 @@ func (m SftpModel) View() string {
 	right := m.renderPane(rightTitle, m.visible(PaneRemote), m.RemoteCursor, m.RemoteScroll, m.RemoteSelected, m.RemoteFilter, m.Active == PaneRemote, paneW, paneH)
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	hints := "[Tab] switch  [→/Enter] open  [←/Bksp] back  [Space] select  [c] copy  [d] del  [u] undo  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
+	hints := "[Tab] switch  [→/Enter] open  [←] back  [Bksp] parent  [Space] select  [c] copy  [d] del  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
 	if m.Filtering {
 		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
 	}
