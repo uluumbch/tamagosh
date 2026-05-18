@@ -151,6 +151,48 @@ func (c *Client) Stat(path string) (Entry, error) {
 	return Entry{Name: info.Name(), IsDir: info.IsDir(), Size: info.Size(), ModTime: info.ModTime()}, nil
 }
 
+func (c *Client) Chmod(path string, mode os.FileMode) error {
+	return c.sftp.Chmod(path, mode)
+}
+
+func (c *Client) Walk(root string, fn func(path string, isDir bool, size int64) error) error {
+	return walkRemote(c.sftp, root, fn)
+}
+
+func walkRemote(sc *sftp.Client, dir string, fn func(string, bool, int64) error) error {
+	info, err := sc.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fn(dir, false, info.Size())
+	}
+	if err := fn(dir, true, 0); err != nil {
+		return err
+	}
+	entries, err := sc.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		sub := dir
+		if !strings.HasSuffix(sub, "/") {
+			sub += "/"
+		}
+		sub += e.Name()
+		if e.IsDir() {
+			if err := walkRemote(sc, sub, fn); err != nil {
+				return err
+			}
+		} else {
+			if err := fn(sub, false, e.Size()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 type progressReader struct {
 	r  io.Reader
 	cb func(int64)

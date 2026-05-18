@@ -2,9 +2,12 @@ package ui
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -29,6 +32,11 @@ type SftpErrorMsg struct{ Err error }
 type SftpRefreshMsg struct{}
 type sftpTickMsg struct{}
 type sftpTransferEndMsg struct{}
+type editorDoneMsg struct {
+	err     error
+	pane    Pane
+	cleanup string
+}
 
 type transferState struct {
 	BytesDone  atomic.Int64
@@ -355,6 +363,21 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.TransferActive = false
 		m.Transfer = nil
 		return m, nil
+	case editorDoneMsg:
+		if msg.cleanup != "" {
+			_ = os.RemoveAll(msg.cleanup)
+		}
+		if msg.err != nil {
+			m.Err = msg.err.Error()
+		} else {
+			m.Info = "edit saved"
+		}
+		if msg.pane == PaneLocal {
+			m.refreshLocal()
+		} else {
+			m.refreshRemote()
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.ShowInfo {
 			m.ShowInfo = false
@@ -558,6 +581,15 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "h", "?":
 				m.ShowHelp = true
+			case "e":
+				return m, m.editCurrent()
+			case "x":
+				targets := m.gatherTargets(false)
+				if len(targets) == 0 {
+					return m, nil
+				}
+				m.ConfirmTargets = targets
+				m.startPrompt("chmod", "644", "chmod: ")
 			case ".":
 				m.ShowHidden = !m.ShowHidden
 				m.LocalCursor = 0
@@ -717,10 +749,70 @@ func (m *SftpModel) gatherTargets(filesOnly bool) []sftppkg.Entry {
 	}
 	e := vis[cursor]
 	if filesOnly && e.IsDir {
-		m.Err = "directory copy not supported"
 		return nil
 	}
 	return []sftppkg.Entry{e}
+}
+
+type copyItem struct {
+	relPath string
+	size    int64
+	isDir   bool
+}
+
+func (m *SftpModel) expandCopyItems(targets []sftppkg.Entry) ([]copyItem, int64) {
+	var items []copyItem
+	var total int64
+	for _, e := range targets {
+		if m.Active == PaneLocal {
+			base := filepath.Join(m.LocalDir, e.Name)
+			if !e.IsDir {
+				items = append(items, copyItem{relPath: e.Name, size: e.Size})
+				total += e.Size
+				continue
+			}
+			_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+				if err != nil {
+					return nil
+				}
+				rel, rerr := filepath.Rel(m.LocalDir, p)
+				if rerr != nil {
+					return nil
+				}
+				if d.IsDir() {
+					items = append(items, copyItem{relPath: rel, isDir: true})
+					return nil
+				}
+				info, ierr := d.Info()
+				var sz int64
+				if ierr == nil {
+					sz = info.Size()
+				}
+				items = append(items, copyItem{relPath: rel, size: sz})
+				total += sz
+				return nil
+			})
+		} else {
+			base := sftppkg.Join(m.RemoteDir, e.Name)
+			if !e.IsDir {
+				items = append(items, copyItem{relPath: e.Name, size: e.Size})
+				total += e.Size
+				continue
+			}
+			prefix := strings.TrimSuffix(m.RemoteDir, "/") + "/"
+			_ = m.Client.Walk(base, func(p string, isDir bool, size int64) error {
+				rel := strings.TrimPrefix(p, prefix)
+				if isDir {
+					items = append(items, copyItem{relPath: rel, isDir: true})
+					return nil
+				}
+				items = append(items, copyItem{relPath: rel, size: size})
+				total += size
+				return nil
+			})
+		}
+	}
+	return items, total
 }
 
 func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
@@ -728,26 +820,16 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 		return nil
 	}
 
-	var totalBytes int64
-	for _, e := range targets {
-		if m.Active == PaneLocal {
-			info, err := os.Stat(filepath.Join(m.LocalDir, e.Name))
-			if err == nil {
-				totalBytes += info.Size()
-			}
-		} else {
-			sz, err := m.Client.RemoteSize(sftppkg.Join(m.RemoteDir, e.Name))
-			if err == nil {
-				totalBytes += sz
-			}
-		}
+	items, totalBytes := m.expandCopyItems(targets)
+	if len(items) == 0 {
+		return nil
 	}
 
 	ts := &transferState{
 		BytesTotal: totalBytes,
-		FileTotal:  int32(len(targets)),
+		FileTotal:  int32(len(items)),
 	}
-	first := targets[0].Name
+	first := items[0].relPath
 	ts.FileName.Store(&first)
 	if m.Active == PaneLocal {
 		ts.Refresh = PaneRemote
@@ -764,24 +846,33 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 	client := m.Client
 	localDir := m.LocalDir
 	remoteDir := m.RemoteDir
-	entries := append([]sftppkg.Entry{}, targets...)
+	queue := append([]copyItem{}, items...)
 
 	go func() {
-		for i, e := range entries {
-			name := e.Name
+		for i, it := range queue {
+			name := it.relPath
 			ts.FileName.Store(&name)
 			ts.FileIdx.Store(int32(i + 1))
 			cb := func(n int64) {
 				ts.BytesDone.Add(n)
 			}
 			var err error
-			if dir == PaneLocal {
-				src := filepath.Join(localDir, e.Name)
-				dst := sftppkg.Join(remoteDir, e.Name)
+			if it.isDir {
+				if dir == PaneLocal {
+					err = client.Mkdir(sftppkg.Join(remoteDir, it.relPath))
+				} else {
+					err = os.MkdirAll(filepath.Join(localDir, it.relPath), 0o755)
+				}
+				if err != nil && strings.Contains(err.Error(), "exists") {
+					err = nil
+				}
+			} else if dir == PaneLocal {
+				src := filepath.Join(localDir, it.relPath)
+				dst := sftppkg.Join(remoteDir, it.relPath)
 				err = client.UploadProgress(src, dst, cb)
 			} else {
-				src := sftppkg.Join(remoteDir, e.Name)
-				dst := filepath.Join(localDir, e.Name)
+				src := sftppkg.Join(remoteDir, it.relPath)
+				dst := filepath.Join(localDir, it.relPath)
 				err = client.DownloadProgress(src, dst, cb)
 			}
 			if err != nil {
@@ -1118,10 +1209,12 @@ func renderHelpBox(width int) string {
 			{"A", "clear selection"},
 		}},
 		{"File operations", []keyHint{
-			{"c", "copy (cursor or selected)"},
+			{"c", "copy (file or directory, recursive)"},
 			{"d", "delete (with confirm)"},
 			{"R", "rename cursor item"},
 			{"m", "make new directory"},
+			{"e", "edit in $EDITOR (auto upload if remote)"},
+			{"x", "chmod (octal mode, e.g. 644)"},
 			{"b", "bookmark current dir"},
 		}},
 		{"View", []keyHint{
@@ -1510,6 +1603,8 @@ func (m SftpModel) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.execMkdir(input)
 		case "goto":
 			m.execGoto(input)
+		case "chmod":
+			m.execChmod(input)
 		}
 		return m, nil
 	case tea.KeyBackspace:
@@ -1574,6 +1669,110 @@ func (m *SftpModel) execMkdir(name string) {
 		m.refreshRemote()
 	}
 	m.Info = "created: " + name
+}
+
+func (m *SftpModel) execChmod(modeStr string) {
+	mode64, err := strconv.ParseUint(modeStr, 8, 32)
+	if err != nil {
+		m.Err = "invalid mode: " + modeStr
+		return
+	}
+	mode := os.FileMode(mode64)
+	targets := m.ConfirmTargets
+	m.ConfirmTargets = nil
+	if len(targets) == 0 {
+		return
+	}
+	ok := 0
+	for _, e := range targets {
+		if m.Active == PaneLocal {
+			p := filepath.Join(m.LocalDir, e.Name)
+			if err := os.Chmod(p, mode); err != nil {
+				m.Err = err.Error()
+				return
+			}
+		} else {
+			if m.Client == nil {
+				return
+			}
+			p := sftppkg.Join(m.RemoteDir, e.Name)
+			if err := m.Client.Chmod(p, mode); err != nil {
+				m.Err = err.Error()
+				return
+			}
+		}
+		ok++
+	}
+	m.Info = fmt.Sprintf("chmod %o on %d item(s)", mode, ok)
+	if m.Active == PaneLocal {
+		m.refreshLocal()
+	} else {
+		m.refreshRemote()
+	}
+}
+
+func (m *SftpModel) editCurrent() tea.Cmd {
+	vis := m.visible(m.Active)
+	var cur int
+	if m.Active == PaneLocal {
+		cur = m.LocalCursor
+	} else {
+		cur = m.RemoteCursor
+	}
+	if cur < 0 || cur >= len(vis) {
+		return nil
+	}
+	e := vis[cur]
+	if e.IsDir {
+		m.Err = "can't edit directory"
+		return nil
+	}
+
+	editor := os.Getenv("VISUAL")
+	if editor == "" {
+		editor = os.Getenv("EDITOR")
+	}
+	if editor == "" {
+		editor = "vi"
+	}
+
+	pane := m.Active
+	var localPath, remotePath, cleanup string
+
+	if pane == PaneLocal {
+		localPath = filepath.Join(m.LocalDir, e.Name)
+	} else {
+		if m.Client == nil {
+			return nil
+		}
+		tmpDir, err := os.MkdirTemp("", "tamagosh-edit-*")
+		if err != nil {
+			m.Err = err.Error()
+			return nil
+		}
+		localPath = filepath.Join(tmpDir, e.Name)
+		remotePath = sftppkg.Join(m.RemoteDir, e.Name)
+		if err := m.Client.Download(remotePath, localPath); err != nil {
+			os.RemoveAll(tmpDir)
+			m.Err = err.Error()
+			return nil
+		}
+		cleanup = tmpDir
+	}
+
+	client := m.Client
+	cmd := exec.Command(editor, localPath)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			return editorDoneMsg{err: err, pane: pane, cleanup: cleanup}
+		}
+		if pane == PaneRemote {
+			if uerr := client.Upload(localPath, remotePath); uerr != nil {
+				return editorDoneMsg{err: uerr, pane: pane, cleanup: cleanup}
+			}
+		}
+		return editorDoneMsg{pane: pane, cleanup: cleanup}
+	})
 }
 
 func (m *SftpModel) execGoto(path string) {
