@@ -38,6 +38,7 @@ func (f *fakePass) Delete(k string) error {
 func TestAppRoutesNewFormMsg(t *testing.T) {
 	tmpPath := t.TempDir() + "/c.json"
 	a := NewApp(&config.Store{}, &fakePass{}, nil, tmpPath)
+	a.Mode = ModeList
 	if a.View() == "" {
 		t.Fatalf("empty view")
 	}
@@ -52,6 +53,7 @@ func TestAppFormSubmitAddsConnection(t *testing.T) {
 	tmpPath := t.TempDir() + "/c.json"
 	p := &fakePass{}
 	a := NewApp(&config.Store{}, p, nil, tmpPath)
+	a.Mode = ModeList
 	a, _ = updateApp(a, NewFormMsg{})
 	a, _ = updateApp(a, FormSubmitMsg{
 		IsEdit:   false,
@@ -74,6 +76,7 @@ func TestAppDeleteMsgRemovesConnection(t *testing.T) {
 	p := &fakePass{values: map[string]string{"ssh/a": "pw"}}
 	s := &config.Store{Connections: []config.Connection{{Name: "a", PassKey: "ssh/a"}}}
 	a := NewApp(s, p, nil, tmpPath)
+	a.Mode = ModeList
 	a, _ = updateApp(a, DeleteMsg{Conn: s.Connections[0]})
 	if a.Mode != ModeConfirmDelete {
 		t.Fatalf("mode=%v", a.Mode)
