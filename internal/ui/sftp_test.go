@@ -9,7 +9,7 @@ import (
 )
 
 func TestSftpTabSwitchesPane(t *testing.T) {
-	m := NewSftpModel(nil, "/local", "/remote")
+	m := NewSftpModel(nil, "/local", "/remote", nil, "")
 	if m.Active != PaneLocal {
 		t.Fatalf("active=%v", m.Active)
 	}
@@ -26,7 +26,7 @@ func TestSftpTabSwitchesPane(t *testing.T) {
 }
 
 func TestSftpCursorNavigatesActivePane(t *testing.T) {
-	m := NewSftpModel(nil, "/local", "/remote")
+	m := NewSftpModel(nil, "/local", "/remote", nil, "")
 	m.LocalEntries = []sftp.Entry{{Name: "a"}, {Name: "b"}, {Name: "c"}}
 	m.RemoteEntries = []sftp.Entry{{Name: "x"}, {Name: "y"}}
 
@@ -46,7 +46,7 @@ func TestSftpCursorNavigatesActivePane(t *testing.T) {
 }
 
 func TestSftpQuitEmits(t *testing.T) {
-	m := NewSftpModel(nil, "/local", "/remote")
+	m := NewSftpModel(nil, "/local", "/remote", nil, "")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
 		t.Fatalf("expected cmd")

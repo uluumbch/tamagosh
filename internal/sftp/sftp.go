@@ -135,6 +135,22 @@ func (c *Client) RemoteSize(path string) (int64, error) {
 	return info.Size(), nil
 }
 
+func (c *Client) Mkdir(path string) error {
+	return c.sftp.Mkdir(path)
+}
+
+func (c *Client) Rename(oldPath, newPath string) error {
+	return c.sftp.Rename(oldPath, newPath)
+}
+
+func (c *Client) Stat(path string) (Entry, error) {
+	info, err := c.sftp.Stat(path)
+	if err != nil {
+		return Entry{}, err
+	}
+	return Entry{Name: info.Name(), IsDir: info.IsDir(), Size: info.Size(), ModTime: info.ModTime()}, nil
+}
+
 type progressReader struct {
 	r  io.Reader
 	cb func(int64)

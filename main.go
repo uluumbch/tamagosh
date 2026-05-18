@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/candratama/sshm/internal/bookmark"
 	"github.com/candratama/sshm/internal/config"
 	"github.com/candratama/sshm/internal/secret"
 	"github.com/candratama/sshm/internal/ui"
@@ -30,13 +31,20 @@ func main() {
 		os.Exit(1)
 	}
 
-	sec, err := secret.New(filepath.Dir(path))
+	dir := filepath.Dir(path)
+	sec, err := secret.New(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "secret:", err)
 		os.Exit(1)
 	}
 
-	app := ui.NewApp(store, sec, path)
+	bm, err := bookmark.New(dir)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bookmark:", err)
+		os.Exit(1)
+	}
+
+	app := ui.NewApp(store, sec, bm, path)
 	p := tea.NewProgram(app, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "tea:", err)

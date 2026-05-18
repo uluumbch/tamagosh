@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/candratama/sshm/internal/bookmark"
 	"github.com/candratama/sshm/internal/config"
 	sftppkg "github.com/candratama/sshm/internal/sftp"
 	"github.com/candratama/sshm/internal/ssh"
@@ -39,6 +40,7 @@ type AppModel struct {
 	Store     *config.Store
 	StorePath string
 	Pass      PassStore
+	Bookmark  *bookmark.Store
 	List      ListModel
 	Form      FormModel
 	Sftp      SftpModel
@@ -48,12 +50,13 @@ type AppModel struct {
 	Err       string
 }
 
-func NewApp(store *config.Store, pass PassStore, storePath string) AppModel {
+func NewApp(store *config.Store, pass PassStore, bm *bookmark.Store, storePath string) AppModel {
 	return AppModel{
 		Mode:      ModeList,
 		Store:     store,
 		StorePath: storePath,
 		Pass:      pass,
+		Bookmark:  bm,
 		List:      NewListModel(store),
 	}
 }
@@ -231,7 +234,8 @@ func (a AppModel) handleSftp(c config.Connection) (tea.Model, tea.Cmd) {
 	if err != nil {
 		localHome, _ = filepath.Abs(".")
 	}
-	a.Sftp = NewSftpModel(client, localHome, remoteHome)
+	scope := fmt.Sprintf("remote:%s@%s:%d", c.User, c.Host, c.Port)
+	a.Sftp = NewSftpModel(client, localHome, remoteHome, a.Bookmark, scope)
 	if a.Width > 0 && a.Height > 0 {
 		a.Sftp.Width = a.Width
 		a.Sftp.Height = a.Height

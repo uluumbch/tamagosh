@@ -12,6 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/candratama/sshm/internal/bookmark"
 	sftppkg "github.com/candratama/sshm/internal/sftp"
 )
 
@@ -66,9 +67,26 @@ type SftpModel struct {
 	Transfer       *transferState
 	ConfirmAction  string
 	ConfirmTargets []sftppkg.Entry
+	PromptAction   string
+	PromptInput    string
+	PromptInitial  string
+	SortMode       int
+	SortAsc        bool
+	ShowInfo       bool
+	InfoEntry      sftppkg.Entry
+	Bookmark       *bookmark.Store
+	BookmarkScope  string
+	BookmarkList   []string
+	BookmarkCursor int
 }
 
-func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string) SftpModel {
+const (
+	SortName = iota
+	SortSize
+	SortMTime
+)
+
+func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string, bm *bookmark.Store, scope string) SftpModel {
 	m := SftpModel{
 		Client:         client,
 		LocalDir:       localDir,
@@ -78,10 +96,21 @@ func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string) SftpModel 
 		Active:         PaneLocal,
 		Width:          80,
 		Height:         24,
+		SortMode:       SortName,
+		SortAsc:        true,
+		Bookmark:       bm,
+		BookmarkScope:  scope,
 	}
 	m.refreshLocal()
 	m.refreshRemote()
 	return m
+}
+
+func (m SftpModel) currentScope() string {
+	if m.Active == PaneLocal {
+		return "local"
+	}
+	return m.BookmarkScope
 }
 
 func (m *SftpModel) refreshLocal() {
@@ -102,7 +131,7 @@ func (m *SftpModel) refreshLocal() {
 		}
 		entries = append(entries, sftppkg.Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: size, ModTime: mt})
 	}
-	sortEntries(entries)
+	m.sortEntriesSlice(entries)
 	m.LocalEntries = entries
 	m.LocalSelected = map[string]bool{}
 	m.LocalCursor = 0
@@ -119,20 +148,55 @@ func (m *SftpModel) refreshRemote() {
 		m.RemoteEntries = nil
 		return
 	}
-	sortEntries(entries)
+	m.sortEntriesSlice(entries)
 	m.RemoteEntries = entries
 	m.RemoteSelected = map[string]bool{}
 	m.RemoteCursor = 0
 	m.RemoteScroll = 0
 }
 
-func sortEntries(entries []sftppkg.Entry) {
+func (m SftpModel) sortEntriesSlice(entries []sftppkg.Entry) {
 	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir != entries[j].IsDir {
-			return entries[i].IsDir
+		a, b := entries[i], entries[j]
+		if a.IsDir != b.IsDir {
+			return a.IsDir
 		}
-		return entries[i].Name < entries[j].Name
+		var less bool
+		switch m.SortMode {
+		case SortSize:
+			if a.Size == b.Size {
+				less = a.Name < b.Name
+			} else {
+				less = a.Size < b.Size
+			}
+		case SortMTime:
+			if a.ModTime.Equal(b.ModTime) {
+				less = a.Name < b.Name
+			} else {
+				less = a.ModTime.Before(b.ModTime)
+			}
+		default:
+			less = a.Name < b.Name
+		}
+		if !m.SortAsc {
+			return !less
+		}
+		return less
 	})
+}
+
+func (m SftpModel) sortLabel() string {
+	mode := "name"
+	switch m.SortMode {
+	case SortSize:
+		mode = "size"
+	case SortMTime:
+		mode = "mtime"
+	}
+	if m.SortAsc {
+		return mode + " ↑"
+	}
+	return mode + " ↓"
 }
 
 func (m SftpModel) visible(pane Pane) []sftppkg.Entry {
@@ -285,6 +349,16 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Transfer = nil
 		return m, nil
 	case tea.KeyMsg:
+		if m.ShowInfo {
+			m.ShowInfo = false
+			return m, nil
+		}
+		if len(m.BookmarkList) > 0 {
+			return m.handleBookmarkKey(msg)
+		}
+		if m.PromptAction != "" {
+			return m.handlePromptKey(msg)
+		}
 		if m.ConfirmAction != "" {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -424,6 +498,53 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "r":
 				m.refreshLocal()
 				m.refreshRemote()
+			case "R":
+				m.startPromptRename()
+			case "m":
+				m.startPrompt("mkdir", "", "create dir: ")
+			case "g":
+				curDir := m.LocalDir
+				if m.Active == PaneRemote {
+					curDir = m.RemoteDir
+				}
+				m.startPrompt("goto", curDir, "goto: ")
+			case "s":
+				m.SortMode = (m.SortMode + 1) % 3
+				m.sortEntriesSlice(m.LocalEntries)
+				m.sortEntriesSlice(m.RemoteEntries)
+				m.Info = "sort: " + m.sortLabel()
+			case "S":
+				m.SortAsc = !m.SortAsc
+				m.sortEntriesSlice(m.LocalEntries)
+				m.sortEntriesSlice(m.RemoteEntries)
+				m.Info = "sort: " + m.sortLabel()
+			case "i":
+				vis := m.visible(m.Active)
+				cur := m.LocalCursor
+				if m.Active == PaneRemote {
+					cur = m.RemoteCursor
+				}
+				if cur >= 0 && cur < len(vis) {
+					m.InfoEntry = vis[cur]
+					m.ShowInfo = true
+				}
+			case "b":
+				if m.Bookmark != nil {
+					dir := m.LocalDir
+					if m.Active == PaneRemote {
+						dir = m.RemoteDir
+					}
+					if err := m.Bookmark.Add(m.currentScope(), dir); err != nil {
+						m.Err = err.Error()
+					} else {
+						m.Info = "bookmarked: " + dir
+					}
+				}
+			case "'":
+				if m.Bookmark != nil {
+					m.BookmarkList = m.Bookmark.List(m.currentScope())
+					m.BookmarkCursor = 0
+				}
 			case ".":
 				m.ShowHidden = !m.ShowHidden
 				m.LocalCursor = 0
@@ -729,13 +850,19 @@ func (m SftpModel) View() string {
 	right := m.renderPane(rightTitle, m.visible(PaneRemote), m.RemoteCursor, m.RemoteScroll, m.RemoteSelected, m.RemoteFilter, m.Active == PaneRemote, paneW, paneH)
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	hints := "[Tab] switch  [→/Enter] open  [←] back  [Bksp] parent  [Space] select  [c] copy  [d] del  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
+	hints := "[Tab] [→]open [←]back [Bksp]parent [Space]select [c]copy [d]del [R]rename [m]kdir [g]oto [s/S]sort [i]nfo [b]ookmark ['] list [/]find [.]hidden [a/A] all/clr [r]efresh [q]back"
 	if m.Filtering {
 		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
+	}
+	if m.PromptAction != "" {
+		hints = fmt.Sprintf("%s: %s_  [Enter] confirm  [Esc] cancel", m.PromptAction, m.PromptInput)
 	}
 	if m.ConfirmAction != "" {
 		verb := m.ConfirmAction
 		hints = StyleSelected.Render(fmt.Sprintf(" %s %d item(s)? [y/N] ", verb, len(m.ConfirmTargets)))
+	}
+	if len(m.BookmarkList) > 0 {
+		hints = fmt.Sprintf("bookmarks (%d/%d) [↑↓] move  [Enter] jump  [d] del  [Esc] close", m.BookmarkCursor+1, len(m.BookmarkList))
 	}
 	var detail string
 	visAct := m.visible(m.Active)
@@ -783,7 +910,57 @@ func (m SftpModel) View() string {
 	} else if m.Info != "" {
 		help = StyleHelp.Render(m.Info) + "\n" + help
 	}
-	return joined + "\n" + help
+	out := joined + "\n" + help
+
+	if m.ShowInfo {
+		out = renderInfoModal(m.InfoEntry, m.Active, m.LocalDir, m.RemoteDir) + "\n" + out
+	}
+	if len(m.BookmarkList) > 0 {
+		out = renderBookmarkList(m.BookmarkList, m.BookmarkCursor) + "\n" + out
+	}
+	return out
+}
+
+func renderInfoModal(e sftppkg.Entry, pane Pane, localDir, remoteDir string) string {
+	kind := "file"
+	if e.IsDir {
+		kind = "directory"
+	}
+	mt := "-"
+	if !e.ModTime.IsZero() {
+		mt = e.ModTime.Local().Format("2026-01-02 15:04:05 MST")
+	}
+	dir := localDir
+	if pane == PaneRemote {
+		dir = remoteDir
+	}
+	full := dir + "/" + e.Name
+	body := StyleTitle.Render("File info") + "\n\n" +
+		fmt.Sprintf("  name: %s\n  kind: %s\n  size: %s (%d bytes)\n  mtime: %s\n  path: %s\n  pane: %s",
+			e.Name, kind, humanSize(e.Size), e.Size, mt, full, paneLabel(pane)) +
+		"\n\n" + StyleHelp.Render("  press any key to close")
+	return StyleBorder.Render(body)
+}
+
+func renderBookmarkList(list []string, cursor int) string {
+	var b strings.Builder
+	b.WriteString(StyleTitle.Render("Bookmarks"))
+	b.WriteString("\n\n")
+	if len(list) == 0 {
+		b.WriteString(StyleHelp.Render("  (empty)"))
+		b.WriteString("\n")
+	}
+	for i, p := range list {
+		line := "  " + p
+		if i == cursor {
+			line = StyleSelected.Render("> " + p)
+		} else {
+			line = StyleNormal.Render(line)
+		}
+		b.WriteString(line)
+		b.WriteString("\n")
+	}
+	return StyleBorder.Render(b.String())
 }
 
 func transferBar(done, total int64, width int) string {
@@ -879,6 +1056,187 @@ func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scr
 		style = StylePaneActive
 	}
 	return style.Width(width).Height(innerH).Render(b.String())
+}
+
+func (m SftpModel) handleBookmarkKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.BookmarkList = nil
+		return m, nil
+	case tea.KeyUp:
+		if m.BookmarkCursor > 0 {
+			m.BookmarkCursor--
+		}
+		return m, nil
+	case tea.KeyDown:
+		if m.BookmarkCursor < len(m.BookmarkList)-1 {
+			m.BookmarkCursor++
+		}
+		return m, nil
+	case tea.KeyEnter:
+		if m.BookmarkCursor < len(m.BookmarkList) {
+			dir := m.BookmarkList[m.BookmarkCursor]
+			if m.Active == PaneLocal {
+				m.LocalHistory = append(m.LocalHistory, m.LocalDir)
+				m.LocalDir = dir
+				m.LocalFilter = ""
+				m.refreshLocal()
+			} else {
+				m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
+				m.RemoteDir = dir
+				m.RemoteFilter = ""
+				m.refreshRemote()
+			}
+		}
+		m.BookmarkList = nil
+		return m, nil
+	case tea.KeyRunes:
+		if string(msg.Runes) == "d" && m.BookmarkCursor < len(m.BookmarkList) {
+			dir := m.BookmarkList[m.BookmarkCursor]
+			if m.Bookmark != nil {
+				m.Bookmark.Remove(m.currentScope(), dir)
+			}
+			m.BookmarkList = m.Bookmark.List(m.currentScope())
+			if m.BookmarkCursor >= len(m.BookmarkList) && m.BookmarkCursor > 0 {
+				m.BookmarkCursor--
+			}
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func (m *SftpModel) startPrompt(action, initial, _ string) {
+	m.PromptAction = action
+	m.PromptInput = initial
+	m.PromptInitial = initial
+}
+
+func (m *SftpModel) startPromptRename() {
+	vis := m.visible(m.Active)
+	cur := m.LocalCursor
+	if m.Active == PaneRemote {
+		cur = m.RemoteCursor
+	}
+	if cur < 0 || cur >= len(vis) {
+		return
+	}
+	m.startPrompt("rename", vis[cur].Name, "rename: ")
+}
+
+func (m SftpModel) handlePromptKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyEsc:
+		m.PromptAction = ""
+		m.PromptInput = ""
+		m.PromptInitial = ""
+		return m, nil
+	case tea.KeyEnter:
+		action := m.PromptAction
+		input := strings.TrimSpace(m.PromptInput)
+		m.PromptAction = ""
+		m.PromptInput = ""
+		initial := m.PromptInitial
+		m.PromptInitial = ""
+		if input == "" {
+			return m, nil
+		}
+		switch action {
+		case "rename":
+			m.execRename(initial, input)
+		case "mkdir":
+			m.execMkdir(input)
+		case "goto":
+			m.execGoto(input)
+		}
+		return m, nil
+	case tea.KeyBackspace:
+		if len(m.PromptInput) > 0 {
+			m.PromptInput = m.PromptInput[:len(m.PromptInput)-1]
+		}
+		return m, nil
+	case tea.KeySpace:
+		m.PromptInput += " "
+		return m, nil
+	case tea.KeyRunes:
+		m.PromptInput += string(msg.Runes)
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *SftpModel) execRename(oldName, newName string) {
+	if oldName == newName {
+		return
+	}
+	if m.Active == PaneLocal {
+		oldP := filepath.Join(m.LocalDir, oldName)
+		newP := filepath.Join(m.LocalDir, newName)
+		if err := os.Rename(oldP, newP); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.refreshLocal()
+	} else {
+		if m.Client == nil {
+			return
+		}
+		oldP := sftppkg.Join(m.RemoteDir, oldName)
+		newP := sftppkg.Join(m.RemoteDir, newName)
+		if err := m.Client.Rename(oldP, newP); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.refreshRemote()
+	}
+	m.Info = "renamed"
+}
+
+func (m *SftpModel) execMkdir(name string) {
+	if m.Active == PaneLocal {
+		path := filepath.Join(m.LocalDir, name)
+		if err := os.Mkdir(path, 0o755); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.refreshLocal()
+	} else {
+		if m.Client == nil {
+			return
+		}
+		path := sftppkg.Join(m.RemoteDir, name)
+		if err := m.Client.Mkdir(path); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.refreshRemote()
+	}
+	m.Info = "created: " + name
+}
+
+func (m *SftpModel) execGoto(path string) {
+	if m.Active == PaneLocal {
+		if _, err := os.Stat(path); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.LocalHistory = append(m.LocalHistory, m.LocalDir)
+		m.LocalDir = path
+		m.LocalFilter = ""
+		m.refreshLocal()
+	} else {
+		if m.Client == nil {
+			return
+		}
+		if _, err := m.Client.Stat(path); err != nil {
+			m.Err = err.Error()
+			return
+		}
+		m.RemoteHistory = append(m.RemoteHistory, m.RemoteDir)
+		m.RemoteDir = path
+		m.RemoteFilter = ""
+		m.refreshRemote()
+	}
 }
 
 func truncate(s string, n int) string {
