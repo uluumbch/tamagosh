@@ -45,7 +45,7 @@ var (
 	// Active pane: same shape as inactive, brighter border to draw the eye.
 	StylePaneActive = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(gbYellow)).
+			BorderForeground(lipgloss.Color(gbGreen)).
 			Padding(0, 1)
 
 	StylePaneInactive = lipgloss.NewStyle().
