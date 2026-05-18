@@ -81,7 +81,16 @@ func preflight() error {
 	_ = os.Remove(probe)
 
 	if os.Getenv("VISUAL") == "" && os.Getenv("EDITOR") == "" {
-		fmt.Fprintln(os.Stderr, "warning: $EDITOR and $VISUAL unset — `e` key will fall back to vi")
+		found := ""
+		for _, c := range []string{"nvim", "vim", "nano", "vi"} {
+			if _, err := exec.LookPath(c); err == nil {
+				found = c
+				break
+			}
+		}
+		if found == "" {
+			fmt.Fprintln(os.Stderr, "warning: no editor found in PATH (install nvim/vim/nano) — `e` key will fail")
+		}
 	}
 	return nil
 }
