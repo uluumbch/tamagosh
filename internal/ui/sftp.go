@@ -11,6 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/candratama/sshm/internal/bookmark"
 	sftppkg "github.com/candratama/sshm/internal/sftp"
@@ -932,11 +933,9 @@ func (m SftpModel) View() string {
 type keyHint struct{ Key, Label string }
 
 var shortKeys = []keyHint{
-	{"Tab", "switch"}, {"→", "open"}, {"←", "back"}, {"Bksp", "parent"},
-	{"Space", "select"}, {"c", "copy"}, {"d", "del"}, {"R", "rename"},
-	{"m", "kdir"}, {"g", "oto"}, {"s/S", "sort"}, {"i", "nfo"},
-	{"b", "save"}, {"'", "list"}, {"/", "find"}, {".", "hidden"},
-	{"a/A", "all/clr"}, {"r", "refresh"}, {"h", "elp"}, {"q", "back"},
+	{"Tab", "switch"}, {"→", "open"}, {"←", "back"},
+	{"Space", "select"}, {"c", "copy"}, {"d", "del"},
+	{"/", "find"}, {"h", "elp"}, {"q", "back"},
 }
 
 func colorHints(keys []keyHint) string {
@@ -1063,18 +1062,27 @@ func overlayCenter(base, box string, width, height int) string {
 	}
 	bl := len(baseLines)
 	btl := len(boxLines)
-	startRow := (bl - btl) / 2
+	// reserve bottom row for help; place overlay above it
+	startRow := (bl - btl - 1) / 2
 	if startRow < 0 {
 		startRow = 0
 	}
-	for i := 0; i < btl && startRow+i < bl; i++ {
+	for i := 0; i < btl && startRow+i < bl-1; i++ {
 		boxLine := boxLines[i]
 		bw := lipgloss.Width(boxLine)
-		left := (width - bw) / 2
-		if left < 0 {
-			left = 0
+		col := (width - bw) / 2
+		if col < 0 {
+			col = 0
 		}
-		baseLines[startRow+i] = strings.Repeat(" ", left) + boxLine
+		baseLine := baseLines[startRow+i]
+		baseW := lipgloss.Width(baseLine)
+		if baseW < width {
+			baseLine += strings.Repeat(" ", width-baseW)
+			baseW = width
+		}
+		leftPart := ansi.Cut(baseLine, 0, col)
+		rightPart := ansi.Cut(baseLine, col+bw, baseW)
+		baseLines[startRow+i] = leftPart + boxLine + rightPart
 	}
 	return strings.Join(baseLines, "\n")
 }
