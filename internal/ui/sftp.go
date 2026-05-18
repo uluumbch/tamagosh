@@ -910,57 +910,88 @@ func (m SftpModel) View() string {
 	} else if m.Info != "" {
 		help = StyleHelp.Render(m.Info) + "\n" + help
 	}
-	out := joined + "\n" + help
+	boxW := m.Width - 2
+	if boxW < 30 {
+		boxW = 30
+	}
 
-	if m.ShowInfo {
-		out = renderInfoModal(m.InfoEntry, m.Active, m.LocalDir, m.RemoteDir) + "\n" + out
+	var overlay string
+	switch {
+	case m.ShowInfo:
+		overlay = renderInfoBox(m.InfoEntry, m.Active, m.LocalDir, m.RemoteDir, boxW)
+	case len(m.BookmarkList) > 0:
+		overlay = renderBookmarkBox(m.BookmarkList, m.BookmarkCursor, boxW)
+	case m.PromptAction != "":
+		overlay = renderPromptBox(m.PromptAction, m.PromptInput, boxW)
 	}
-	if len(m.BookmarkList) > 0 {
-		out = renderBookmarkList(m.BookmarkList, m.BookmarkCursor) + "\n" + out
+
+	if overlay != "" {
+		return joined + "\n" + overlay
 	}
-	return out
+	return joined + "\n" + help
 }
 
-func renderInfoModal(e sftppkg.Entry, pane Pane, localDir, remoteDir string) string {
+func renderInfoBox(e sftppkg.Entry, pane Pane, localDir, remoteDir string, width int) string {
 	kind := "file"
 	if e.IsDir {
 		kind = "directory"
 	}
 	mt := "-"
 	if !e.ModTime.IsZero() {
-		mt = e.ModTime.Local().Format("2026-01-02 15:04:05 MST")
+		mt = e.ModTime.Local().Format("2026-01-02 15:04:05")
 	}
 	dir := localDir
 	if pane == PaneRemote {
 		dir = remoteDir
 	}
 	full := dir + "/" + e.Name
-	body := StyleTitle.Render("File info") + "\n\n" +
-		fmt.Sprintf("  name: %s\n  kind: %s\n  size: %s (%d bytes)\n  mtime: %s\n  path: %s\n  pane: %s",
-			e.Name, kind, humanSize(e.Size), e.Size, mt, full, paneLabel(pane)) +
-		"\n\n" + StyleHelp.Render("  press any key to close")
-	return StyleBorder.Render(body)
+	body := StyleTitle.Render("File info") + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  name : %s", e.Name)) + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  kind : %s", kind)) + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  size : %s (%d bytes)", humanSize(e.Size), e.Size)) + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  mtime: %s", mt)) + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  path : %s", truncate(full, width-12))) + "\n" +
+		StyleNormal.Render(fmt.Sprintf("  pane : %s", paneLabel(pane))) + "\n" +
+		StyleHelp.Render("  [any key] close")
+	return StylePaneActive.Width(width).Render(body)
 }
 
-func renderBookmarkList(list []string, cursor int) string {
+func renderBookmarkBox(list []string, cursor, width int) string {
 	var b strings.Builder
-	b.WriteString(StyleTitle.Render("Bookmarks"))
-	b.WriteString("\n\n")
+	b.WriteString(StyleTitle.Render(fmt.Sprintf("Bookmarks (%d)", len(list))))
+	b.WriteString("\n")
 	if len(list) == 0 {
-		b.WriteString(StyleHelp.Render("  (empty)"))
+		b.WriteString(StyleHelp.Render("  (empty — press [b] in pane to add)"))
 		b.WriteString("\n")
 	}
-	for i, p := range list {
-		line := "  " + p
+	max := 6
+	start := 0
+	if cursor >= max {
+		start = cursor - max + 1
+	}
+	end := start + max
+	if end > len(list) {
+		end = len(list)
+	}
+	for i := start; i < end; i++ {
+		line := "  " + truncate(list[i], width-6)
 		if i == cursor {
-			line = StyleSelected.Render("> " + p)
+			line = StyleSelected.Render("> " + truncate(list[i], width-6))
 		} else {
 			line = StyleNormal.Render(line)
 		}
 		b.WriteString(line)
 		b.WriteString("\n")
 	}
-	return StyleBorder.Render(b.String())
+	b.WriteString(StyleHelp.Render("  [↑↓] move  [Enter] jump  [d] del  [Esc] close"))
+	return StylePaneActive.Width(width).Render(b.String())
+}
+
+func renderPromptBox(action, input string, width int) string {
+	body := StyleTitle.Render(action) + "\n\n" +
+		StyleSelected.Render("  "+input+"_") + "\n\n" +
+		StyleHelp.Render("  [Enter] confirm  [Esc] cancel")
+	return StylePaneActive.Width(width).Render(body)
 }
 
 func transferBar(done, total int64, width int) string {
