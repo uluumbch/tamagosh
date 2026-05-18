@@ -991,13 +991,15 @@ func (m SftpModel) View() string {
 		boxW = 30
 	}
 
-	bottomRows := []string{}
+	parts := []string{}
 	if detail != "" {
-		bottomRows = append(bottomRows, detail)
+		parts = append(parts, detail)
 	}
-	bottomRows = append(bottomRows, help)
+	parts = append(parts, help)
+	bottomBlock := strings.Join(parts, "\n")
+	bottomH := strings.Count(bottomBlock, "\n") + 1
 
-	contentH := m.Height - len(bottomRows)
+	contentH := m.Height - bottomH
 	if contentH < 6 {
 		contentH = 6
 	}
@@ -1025,7 +1027,7 @@ func (m SftpModel) View() string {
 	if overlay != "" {
 		content = overlayCenter(content, overlay, m.Width, contentH)
 	}
-	return content + "\n" + strings.Join(bottomRows, "\n")
+	return content + "\n" + bottomBlock
 }
 
 func (m SftpModel) paneLayout() (paneW int) {
