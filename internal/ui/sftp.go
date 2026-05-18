@@ -1313,7 +1313,7 @@ func renderHelpBox(width int) string {
 	}
 	b.WriteString("\n")
 	b.WriteString(StyleHelp.Render("  press any key to close"))
-	return StylePaneActive.Width(width).Render(b.String())
+	return StyleBorder.Width(width).Render(b.String())
 }
 
 func renderConfirmBox(action string, targets []sftppkg.Entry, width int) string {
@@ -1427,7 +1427,7 @@ func renderInfoBox(e sftppkg.Entry, pane Pane, localDir, remoteDir string, width
 		StyleNormal.Render(fmt.Sprintf("  path : %s", truncate(full, width-12))) + "\n" +
 		StyleNormal.Render(fmt.Sprintf("  pane : %s", paneLabel(pane))) + "\n" +
 		StyleHelp.Render("  [any key] close")
-	return StylePaneActive.Width(width).Render(body)
+	return StyleBorder.Width(width).Render(body)
 }
 
 func renderBookmarkBox(list []string, cursor, width int) string {
@@ -1458,14 +1458,14 @@ func renderBookmarkBox(list []string, cursor, width int) string {
 		b.WriteString("\n")
 	}
 	b.WriteString(StyleHelp.Render("  [↑↓] move  [Enter] jump  [d] del  [Esc] close"))
-	return StylePaneActive.Width(width).Render(b.String())
+	return StyleBorder.Width(width).Render(b.String())
 }
 
 func renderPromptBox(action, input string, width int) string {
 	body := StyleTitle.Render(action) + "\n\n" +
 		StyleSelected.Render("  "+input+"_") + "\n\n" +
 		StyleHelp.Render("  [Enter] confirm  [Esc] cancel")
-	return StylePaneActive.Width(width).Render(body)
+	return StyleBorder.Width(width).Render(body)
 }
 
 func transferBar(done, total int64, width int) string {

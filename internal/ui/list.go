@@ -138,7 +138,7 @@ func (m ListModel) View() string {
 	for i, c := range visible {
 		line := fmt.Sprintf("  %-12s %-18s :%d", c.Name, c.Host, c.Port)
 		if i == m.Cursor {
-			line = StyleSelected.Render("> " + strings.TrimLeft(line, " "))
+			line = StyleSelected.Render("▸ " + strings.TrimLeft(line, " "))
 		} else {
 			line = StyleNormal.Render(line)
 		}
@@ -155,11 +155,6 @@ func (m ListModel) View() string {
 		b.WriteString("\n")
 		b.WriteString(StyleError.Render("  " + m.Err))
 	}
-	listStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(gbAqua)).
-		Padding(1, 3)
-	box := listStyle.Render(b.String())
-
+	box := StyleBorder.Render(b.String())
 	return lipgloss.JoinVertical(lipgloss.Center, renderHeader(), "", box)
 }

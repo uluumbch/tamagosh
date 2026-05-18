@@ -183,9 +183,5 @@ func (m FormModel) View() string {
 			Render(m.Err)
 		b.WriteString(errLine)
 	}
-	return lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(gbAqua)).
-		Padding(1, 2).
-		Render(b.String())
+	return StyleBorder.Render(b.String())
 }
