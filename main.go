@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -16,6 +17,19 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "uninstall":
+			uninstall()
+			return
+		case "--help", "-h", "help":
+			usage()
+			return
+		case "--version", "-v", "version":
+			fmt.Println("tamagosh")
+			return
+		}
+	}
 	if err := preflight(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -51,6 +65,60 @@ func main() {
 		fmt.Fprintln(os.Stderr, "tea:", err)
 		os.Exit(1)
 	}
+}
+
+func usage() {
+	fmt.Println(`tamagosh — SSH/SFTP terminal manager
+
+usage:
+  tamagosh             launch TUI
+  tamagosh uninstall   remove config dir + binary (interactive)
+  tamagosh help        this message
+  tamagosh version     show name
+
+env:
+  TAMAGOSH_HOME        override default config dir (~/.config/tamagosh)
+  EDITOR / VISUAL      editor for [e] key in SFTP browser`)
+}
+
+func uninstall() {
+	cfgPath, _ := config.DefaultPath()
+	cfgDir := filepath.Dir(cfgPath)
+	exe, _ := os.Executable()
+
+	fmt.Println("tamagosh uninstall — review what will be removed:")
+	fmt.Printf("  config dir: %s\n", cfgDir)
+	if exe != "" {
+		fmt.Printf("  binary:     %s\n", exe)
+	}
+	fmt.Println()
+	fmt.Println("warning: removing config dir wipes the AES key —")
+	fmt.Println("         all saved passwords become unrecoverable.")
+	fmt.Print("\nproceed? [y/N] ")
+
+	var ans string
+	_, _ = fmt.Scanln(&ans)
+	ans = strings.ToLower(strings.TrimSpace(ans))
+	if ans != "y" && ans != "yes" {
+		fmt.Println("aborted")
+		return
+	}
+
+	if err := os.RemoveAll(cfgDir); err != nil {
+		fmt.Fprintln(os.Stderr, "remove config:", err)
+	} else {
+		fmt.Println("removed config dir")
+	}
+
+	if exe != "" {
+		if err := os.Remove(exe); err != nil {
+			fmt.Fprintln(os.Stderr, "remove binary:", err)
+			fmt.Println("manual: rm", exe)
+		} else {
+			fmt.Println("removed binary")
+		}
+	}
+	fmt.Println("done")
 }
 
 func preflight() error {
