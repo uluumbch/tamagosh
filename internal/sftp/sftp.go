@@ -15,9 +15,10 @@ import (
 )
 
 type Entry struct {
-	Name  string
-	IsDir bool
-	Size  int64
+	Name    string
+	IsDir   bool
+	Size    int64
+	ModTime time.Time
 }
 
 type Client struct {
@@ -70,7 +71,7 @@ func (c *Client) List(dir string) ([]Entry, error) {
 	}
 	out := make([]Entry, 0, len(infos))
 	for _, fi := range infos {
-		out = append(out, Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: fi.Size()})
+		out = append(out, Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: fi.Size(), ModTime: fi.ModTime()})
 	}
 	return out, nil
 }

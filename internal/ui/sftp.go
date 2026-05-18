@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -83,10 +84,12 @@ func (m *SftpModel) refreshLocal() {
 	for _, fi := range infos {
 		info, _ := fi.Info()
 		size := int64(0)
+		var mt time.Time
 		if info != nil {
 			size = info.Size()
+			mt = info.ModTime()
 		}
-		entries = append(entries, sftppkg.Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: size})
+		entries = append(entries, sftppkg.Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: size, ModTime: mt})
 	}
 	sortEntries(entries)
 	m.LocalEntries = entries
@@ -155,7 +158,7 @@ func (m SftpModel) activeFilter() string {
 func (m SftpModel) Init() tea.Cmd { return nil }
 
 func (m SftpModel) paneBodyHeight() int {
-	h := m.Height - 6
+	h := m.Height - 8
 	if h < 3 {
 		h = 3
 	}
@@ -566,7 +569,7 @@ func (m SftpModel) View() string {
 	if paneW < 24 {
 		paneW = 24
 	}
-	paneH := m.Height - 3
+	paneH := m.Height - 4
 	if paneH < 6 {
 		paneH = 6
 	}
@@ -581,7 +584,22 @@ func (m SftpModel) View() string {
 	if m.Filtering {
 		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
 	}
+	var detail string
+	visAct := m.visible(m.Active)
+	var curIdx int
+	if m.Active == PaneLocal {
+		curIdx = m.LocalCursor
+	} else {
+		curIdx = m.RemoteCursor
+	}
+	if curIdx >= 0 && curIdx < len(visAct) {
+		detail = StyleHelp.Render(paneLabel(m.Active) + " ▸ " + truncate(entryDetail(visAct[curIdx]), m.Width-4))
+	}
+
 	help := StyleHelp.Render(hints)
+	if detail != "" {
+		help = detail + "\n" + help
+	}
 	if m.TransferActive {
 		bar := transferBar(m.TransferDone, m.TransferTotal, 20)
 		status := fmt.Sprintf("transferring %d/%d %s  %s", m.TransferDone, m.TransferTotal, bar, truncate(m.TransferName, 40))
@@ -642,7 +660,7 @@ func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scr
 			if e.IsDir {
 				name += "/"
 			}
-			name = truncate(name, nameW)
+			name = truncateMiddle(name, nameW)
 			marker := " "
 			if selected[e.Name] {
 				marker = "*"
@@ -697,4 +715,47 @@ func truncate(s string, n int) string {
 		return s[:n]
 	}
 	return "..." + s[len(s)-(n-3):]
+}
+
+func truncateMiddle(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	if n <= 3 {
+		return s[:n]
+	}
+	left := (n - 3) / 2
+	right := n - 3 - left
+	return s[:left] + "..." + s[len(s)-right:]
+}
+
+func humanSize(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+func entryDetail(e sftppkg.Entry) string {
+	kind := "file"
+	if e.IsDir {
+		kind = "dir "
+	}
+	mt := "-"
+	if !e.ModTime.IsZero() {
+		mt = e.ModTime.Local().Format("2026-01-02 15:04")
+	}
+	if e.IsDir {
+		return fmt.Sprintf("%s  %s  %s", kind, mt, e.Name)
+	}
+	return fmt.Sprintf("%s  %s  %s  %s", kind, humanSize(e.Size), mt, e.Name)
 }
