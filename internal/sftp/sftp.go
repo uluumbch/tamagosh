@@ -88,6 +88,14 @@ func (c *Client) Delete(remotePath string) error {
 }
 
 func (c *Client) Download(remotePath, localPath string) error {
+	return c.DownloadProgress(remotePath, localPath, nil)
+}
+
+func (c *Client) Upload(localPath, remotePath string) error {
+	return c.UploadProgress(localPath, remotePath, nil)
+}
+
+func (c *Client) DownloadProgress(remotePath, localPath string, onBytes func(int64)) error {
 	src, err := c.sftp.Open(remotePath)
 	if err != nil {
 		return err
@@ -98,11 +106,12 @@ func (c *Client) Download(remotePath, localPath string) error {
 		return err
 	}
 	defer dst.Close()
-	_, err = io.Copy(dst, src)
+	r := &progressReader{r: src, cb: onBytes}
+	_, err = io.Copy(dst, r)
 	return err
 }
 
-func (c *Client) Upload(localPath, remotePath string) error {
+func (c *Client) UploadProgress(localPath, remotePath string, onBytes func(int64)) error {
 	src, err := os.Open(localPath)
 	if err != nil {
 		return err
@@ -113,8 +122,30 @@ func (c *Client) Upload(localPath, remotePath string) error {
 		return err
 	}
 	defer dst.Close()
-	_, err = io.Copy(dst, src)
+	r := &progressReader{r: src, cb: onBytes}
+	_, err = io.Copy(dst, r)
 	return err
+}
+
+func (c *Client) RemoteSize(path string) (int64, error) {
+	info, err := c.sftp.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
+}
+
+type progressReader struct {
+	r  io.Reader
+	cb func(int64)
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 && p.cb != nil {
+		p.cb(int64(n))
+	}
+	return n, err
 }
 
 func Parent(p string) string {

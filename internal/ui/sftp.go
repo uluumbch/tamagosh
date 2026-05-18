@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -24,10 +25,18 @@ const (
 type SftpQuitMsg struct{}
 type SftpErrorMsg struct{ Err error }
 type SftpRefreshMsg struct{}
-type SftpProgressMsg struct {
-	Idx, Total int
-	Name       string
-	Err        error
+type sftpTickMsg struct{}
+type sftpTransferEndMsg struct{}
+
+type transferState struct {
+	BytesDone  atomic.Int64
+	BytesTotal int64
+	FileIdx    atomic.Int32
+	FileTotal  int32
+	FileName   atomic.Pointer[string]
+	Done       atomic.Bool
+	Err        atomic.Pointer[string]
+	Refresh    Pane
 }
 
 type SftpModel struct {
@@ -51,10 +60,10 @@ type SftpModel struct {
 	Height           int
 	Err              string
 	Info             string
-	TransferActive   bool
-	TransferTotal    int
-	TransferDone     int
-	TransferName     string
+	TransferActive bool
+	Transfer       *transferState
+	ConfirmAction  string
+	ConfirmTargets []sftppkg.Entry
 }
 
 func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string) SftpModel {
@@ -246,28 +255,63 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		m.refreshRemote()
 		return m, nil
-	case SftpProgressMsg:
-		m.TransferDone = msg.Idx
-		m.TransferName = msg.Name
-		if msg.Err != nil {
-			m.Err = msg.Err.Error()
-			m.TransferActive = false
+	case sftpTickMsg:
+		if m.Transfer == nil {
 			return m, nil
 		}
-		if msg.Idx >= msg.Total && msg.Total > 0 {
-			m.Info = fmt.Sprintf("copied %d file(s)", msg.Total)
-			m.clearSelection()
-			if m.Active == PaneLocal {
-				m.refreshRemote()
+		if m.Transfer.Done.Load() {
+			if errp := m.Transfer.Err.Load(); errp != nil {
+				m.Err = *errp
 			} else {
-				m.refreshLocal()
+				m.Info = fmt.Sprintf("copied %d file(s)", m.Transfer.FileTotal)
+				m.clearSelection()
+				if m.Transfer.Refresh == PaneRemote {
+					m.refreshRemote()
+				} else {
+					m.refreshLocal()
+				}
 			}
+			return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+				return sftpTransferEndMsg{}
+			})
 		}
-		return m, nil
+		return m, tea.Tick(100*time.Millisecond, func(time.Time) tea.Msg {
+			return sftpTickMsg{}
+		})
 	case sftpTransferEndMsg:
 		m.TransferActive = false
+		m.Transfer = nil
 		return m, nil
 	case tea.KeyMsg:
+		if m.ConfirmAction != "" {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.ConfirmAction = ""
+				m.ConfirmTargets = nil
+				return m, nil
+			case tea.KeyRunes:
+				switch string(msg.Runes) {
+				case "y", "Y":
+					action := m.ConfirmAction
+					targets := m.ConfirmTargets
+					m.ConfirmAction = ""
+					m.ConfirmTargets = nil
+					if action == "delete" {
+						m.executeDelete(targets)
+						return m, nil
+					}
+					if action == "copy" {
+						cmd := m.startCopy(targets)
+						return m, cmd
+					}
+				case "n", "N":
+					m.ConfirmAction = ""
+					m.ConfirmTargets = nil
+					return m, nil
+				}
+			}
+			return m, nil
+		}
 		if m.Filtering {
 			switch msg.Type {
 			case tea.KeyEsc:
@@ -351,10 +395,25 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "q":
 				return m, func() tea.Msg { return SftpQuitMsg{} }
 			case "c":
-				cmd := m.copy()
+				targets := m.gatherTargets(true)
+				if len(targets) == 0 {
+					return m, nil
+				}
+				if len(targets) > 1 {
+					m.ConfirmAction = "copy"
+					m.ConfirmTargets = targets
+					return m, nil
+				}
+				cmd := m.startCopy(targets)
 				return m, cmd
 			case "d":
-				m.delete()
+				targets := m.gatherTargets(false)
+				if len(targets) == 0 {
+					return m, nil
+				}
+				m.ConfirmAction = "delete"
+				m.ConfirmTargets = targets
+				return m, nil
 			case "r":
 				m.refreshLocal()
 				m.refreshRemote()
@@ -464,87 +523,21 @@ func (m *SftpModel) ascend() {
 	}
 }
 
-func (m *SftpModel) copy() tea.Cmd {
-	if m.Client == nil {
-		return nil
-	}
+func (m *SftpModel) gatherTargets(filesOnly bool) []sftppkg.Entry {
 	sel := m.selectedAt(m.Active)
 	vis := m.visible(m.Active)
-
 	targets := []sftppkg.Entry{}
 	if len(sel) > 0 {
 		for _, e := range vis {
-			if sel[e.Name] && !e.IsDir {
+			if sel[e.Name] {
+				if filesOnly && e.IsDir {
+					continue
+				}
 				targets = append(targets, e)
 			}
 		}
-	} else {
-		var cursor int
-		if m.Active == PaneLocal {
-			cursor = m.LocalCursor
-		} else {
-			cursor = m.RemoteCursor
-		}
-		if cursor < 0 || cursor >= len(vis) {
-			return nil
-		}
-		e := vis[cursor]
-		if e.IsDir {
-			m.Err = "directory copy not supported"
-			return nil
-		}
-		targets = append(targets, e)
+		return targets
 	}
-
-	if len(targets) == 0 {
-		return nil
-	}
-
-	m.Err = ""
-	m.Info = ""
-	m.TransferActive = true
-	m.TransferTotal = len(targets)
-	m.TransferDone = 0
-	m.TransferName = targets[0].Name
-
-	dir := m.Active
-	client := m.Client
-	localDir := m.LocalDir
-	remoteDir := m.RemoteDir
-	total := len(targets)
-
-	cmds := make([]tea.Cmd, 0, len(targets)+1)
-	firstName := targets[0].Name
-	cmds = append(cmds, tea.Tick(time.Millisecond*60, func(time.Time) tea.Msg {
-		return SftpProgressMsg{Idx: 0, Total: total, Name: firstName}
-	}))
-	for i, e := range targets {
-		idx := i + 1
-		ent := e
-		cmds = append(cmds, func() tea.Msg {
-			var err error
-			if dir == PaneLocal {
-				src := filepath.Join(localDir, ent.Name)
-				dst := sftppkg.Join(remoteDir, ent.Name)
-				err = client.Upload(src, dst)
-			} else {
-				src := sftppkg.Join(remoteDir, ent.Name)
-				dst := filepath.Join(localDir, ent.Name)
-				err = client.Download(src, dst)
-			}
-			return SftpProgressMsg{Idx: idx, Total: total, Name: ent.Name, Err: err}
-		})
-	}
-	cmds = append(cmds, tea.Tick(time.Millisecond*400, func(time.Time) tea.Msg {
-		return sftpTransferEndMsg{}
-	}))
-	return tea.Sequence(cmds...)
-}
-
-type sftpTransferEndMsg struct{}
-
-func (m *SftpModel) delete() {
-	vis := m.visible(m.Active)
 	var cursor int
 	if m.Active == PaneLocal {
 		cursor = m.LocalCursor
@@ -552,28 +545,138 @@ func (m *SftpModel) delete() {
 		cursor = m.RemoteCursor
 	}
 	if cursor < 0 || cursor >= len(vis) {
-		return
+		return nil
 	}
 	e := vis[cursor]
+	if filesOnly && e.IsDir {
+		m.Err = "directory copy not supported"
+		return nil
+	}
+	return []sftppkg.Entry{e}
+}
+
+func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
+	if m.Client == nil || len(targets) == 0 {
+		return nil
+	}
+
+	var totalBytes int64
+	for _, e := range targets {
+		if m.Active == PaneLocal {
+			info, err := os.Stat(filepath.Join(m.LocalDir, e.Name))
+			if err == nil {
+				totalBytes += info.Size()
+			}
+		} else {
+			sz, err := m.Client.RemoteSize(sftppkg.Join(m.RemoteDir, e.Name))
+			if err == nil {
+				totalBytes += sz
+			}
+		}
+	}
+
+	ts := &transferState{
+		BytesTotal: totalBytes,
+		FileTotal:  int32(len(targets)),
+	}
+	first := targets[0].Name
+	ts.FileName.Store(&first)
 	if m.Active == PaneLocal {
-		target := filepath.Join(m.LocalDir, e.Name)
-		if err := os.Remove(target); err != nil {
-			m.Err = err.Error()
-			return
-		}
-		m.refreshLocal()
+		ts.Refresh = PaneRemote
 	} else {
-		if m.Client == nil {
-			return
+		ts.Refresh = PaneLocal
+	}
+
+	m.Err = ""
+	m.Info = ""
+	m.TransferActive = true
+	m.Transfer = ts
+
+	dir := m.Active
+	client := m.Client
+	localDir := m.LocalDir
+	remoteDir := m.RemoteDir
+	entries := append([]sftppkg.Entry{}, targets...)
+
+	go func() {
+		for i, e := range entries {
+			name := e.Name
+			ts.FileName.Store(&name)
+			ts.FileIdx.Store(int32(i + 1))
+			cb := func(n int64) {
+				ts.BytesDone.Add(n)
+			}
+			var err error
+			if dir == PaneLocal {
+				src := filepath.Join(localDir, e.Name)
+				dst := sftppkg.Join(remoteDir, e.Name)
+				err = client.UploadProgress(src, dst, cb)
+			} else {
+				src := sftppkg.Join(remoteDir, e.Name)
+				dst := filepath.Join(localDir, e.Name)
+				err = client.DownloadProgress(src, dst, cb)
+			}
+			if err != nil {
+				es := err.Error()
+				ts.Err.Store(&es)
+				ts.Done.Store(true)
+				return
+			}
 		}
-		target := sftppkg.Join(m.RemoteDir, e.Name)
-		if err := m.Client.Delete(target); err != nil {
-			m.Err = err.Error()
-			return
+		ts.Done.Store(true)
+	}()
+
+	return tea.Tick(60*time.Millisecond, func(time.Time) tea.Msg {
+		return sftpTickMsg{}
+	})
+}
+
+func (m *SftpModel) executeDelete(targets []sftppkg.Entry) {
+	if len(targets) == 0 {
+		return
+	}
+	ok := 0
+	for _, e := range targets {
+		if m.Active == PaneLocal {
+			target := filepath.Join(m.LocalDir, e.Name)
+			var err error
+			if e.IsDir {
+				err = os.RemoveAll(target)
+			} else {
+				err = os.Remove(target)
+			}
+			if err != nil {
+				m.Err = err.Error()
+				if ok > 0 {
+					m.Info = fmt.Sprintf("deleted %d file(s) before error", ok)
+				}
+				m.refreshLocal()
+				return
+			}
+		} else {
+			if m.Client == nil {
+				return
+			}
+			target := sftppkg.Join(m.RemoteDir, e.Name)
+			if err := m.Client.Delete(target); err != nil {
+				m.Err = err.Error()
+				if ok > 0 {
+					m.Info = fmt.Sprintf("deleted %d file(s) before error", ok)
+				}
+				m.refreshRemote()
+				return
+			}
 		}
-		m.refreshRemote()
+		ok++
 	}
 	m.Err = ""
+	m.Info = fmt.Sprintf("deleted %d item(s)", ok)
+	m.clearSelection()
+	if m.Active == PaneLocal {
+		m.refreshLocal()
+	} else {
+		m.refreshRemote()
+	}
 }
 
 func (m SftpModel) View() string {
@@ -592,9 +695,13 @@ func (m SftpModel) View() string {
 	right := m.renderPane(rightTitle, m.visible(PaneRemote), m.RemoteCursor, m.RemoteScroll, m.RemoteSelected, m.RemoteFilter, m.Active == PaneRemote, paneW, paneH)
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 
-	hints := "[Tab] switch  [Enter] open  [Bksp] up  [Space] select  [c] copy  [d] del  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
+	hints := "[Tab] switch  [→/Enter] open  [←/Bksp] back  [Space] select  [c] copy  [d] del  [u] undo  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
 	if m.Filtering {
 		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
+	}
+	if m.ConfirmAction != "" {
+		verb := m.ConfirmAction
+		hints = StyleSelected.Render(fmt.Sprintf(" %s %d item(s)? [y/N] ", verb, len(m.ConfirmTargets)))
 	}
 	var detail string
 	visAct := m.visible(m.Active)
@@ -608,13 +715,34 @@ func (m SftpModel) View() string {
 		detail = StyleHelp.Render(paneLabel(m.Active) + " ▸ " + truncate(entryDetail(visAct[curIdx]), m.Width-4))
 	}
 
-	help := StyleHelp.Render(hints)
+	var help string
+	if m.ConfirmAction != "" {
+		help = hints
+	} else {
+		help = StyleHelp.Render(hints)
+	}
 	if detail != "" {
 		help = detail + "\n" + help
 	}
-	if m.TransferActive {
-		bar := transferBar(m.TransferDone, m.TransferTotal, 20)
-		status := fmt.Sprintf("transferring %d/%d %s  %s", m.TransferDone, m.TransferTotal, bar, truncate(m.TransferName, 40))
+	if m.TransferActive && m.Transfer != nil {
+		done := m.Transfer.BytesDone.Load()
+		total := m.Transfer.BytesTotal
+		idx := m.Transfer.FileIdx.Load()
+		tot := m.Transfer.FileTotal
+		name := ""
+		if p := m.Transfer.FileName.Load(); p != nil {
+			name = *p
+		}
+		pct := 0
+		if total > 0 {
+			pct = int(done * 100 / total)
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		bar := transferBar(done, total, 24)
+		status := fmt.Sprintf("transferring %d/%d  %s  %d%%  %s/%s  %s",
+			idx, tot, bar, pct, humanSize(done), humanSize(total), truncateMiddle(name, 30))
 		help = StyleSelected.Render(status) + "\n" + help
 	} else if m.Err != "" {
 		help = StyleError.Render(m.Err) + "\n" + help
@@ -624,13 +752,16 @@ func (m SftpModel) View() string {
 	return joined + "\n" + help
 }
 
-func transferBar(done, total, width int) string {
-	if total <= 0 {
-		return ""
+func transferBar(done, total int64, width int) string {
+	if total <= 0 || width <= 0 {
+		return "[" + strings.Repeat("-", width) + "]"
 	}
-	filled := done * width / total
+	filled := int(done * int64(width) / total)
 	if filled > width {
 		filled = width
+	}
+	if filled < 0 {
+		filled = 0
 	}
 	return "[" + strings.Repeat("=", filled) + strings.Repeat("-", width-filled) + "]"
 }
