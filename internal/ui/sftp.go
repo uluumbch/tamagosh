@@ -25,29 +25,38 @@ type SftpErrorMsg struct{ Err error }
 type SftpRefreshMsg struct{}
 
 type SftpModel struct {
-	Client        *sftppkg.Client
-	LocalDir      string
-	RemoteDir     string
-	LocalEntries  []sftppkg.Entry
-	RemoteEntries []sftppkg.Entry
-	LocalCursor   int
-	RemoteCursor  int
-	LocalScroll   int
-	RemoteScroll  int
-	Active        Pane
-	Width         int
-	Height        int
-	Err           string
+	Client         *sftppkg.Client
+	LocalDir       string
+	RemoteDir      string
+	LocalEntries   []sftppkg.Entry
+	RemoteEntries  []sftppkg.Entry
+	LocalCursor    int
+	RemoteCursor   int
+	LocalScroll    int
+	RemoteScroll   int
+	LocalSelected  map[string]bool
+	RemoteSelected map[string]bool
+	LocalFilter    string
+	RemoteFilter   string
+	Filtering      bool
+	ShowHidden     bool
+	Active         Pane
+	Width          int
+	Height         int
+	Err            string
+	Info           string
 }
 
 func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string) SftpModel {
 	m := SftpModel{
-		Client:    client,
-		LocalDir:  localDir,
-		RemoteDir: remoteDir,
-		Active:    PaneLocal,
-		Width:     80,
-		Height:    24,
+		Client:         client,
+		LocalDir:       localDir,
+		RemoteDir:      remoteDir,
+		LocalSelected:  map[string]bool{},
+		RemoteSelected: map[string]bool{},
+		Active:         PaneLocal,
+		Width:          80,
+		Height:         24,
 	}
 	m.refreshLocal()
 	m.refreshRemote()
@@ -70,16 +79,10 @@ func (m *SftpModel) refreshLocal() {
 		}
 		entries = append(entries, sftppkg.Entry{Name: fi.Name(), IsDir: fi.IsDir(), Size: size})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].IsDir != entries[j].IsDir {
-			return entries[i].IsDir
-		}
-		return entries[i].Name < entries[j].Name
-	})
+	sortEntries(entries)
 	m.LocalEntries = entries
-	if m.LocalCursor >= len(entries) {
-		m.LocalCursor = 0
-	}
+	m.LocalSelected = map[string]bool{}
+	m.LocalCursor = 0
 	m.LocalScroll = 0
 }
 
@@ -93,23 +96,57 @@ func (m *SftpModel) refreshRemote() {
 		m.RemoteEntries = nil
 		return
 	}
+	sortEntries(entries)
+	m.RemoteEntries = entries
+	m.RemoteSelected = map[string]bool{}
+	m.RemoteCursor = 0
+	m.RemoteScroll = 0
+}
+
+func sortEntries(entries []sftppkg.Entry) {
 	sort.Slice(entries, func(i, j int) bool {
 		if entries[i].IsDir != entries[j].IsDir {
 			return entries[i].IsDir
 		}
 		return entries[i].Name < entries[j].Name
 	})
-	m.RemoteEntries = entries
-	if m.RemoteCursor >= len(entries) {
-		m.RemoteCursor = 0
+}
+
+func (m SftpModel) visible(pane Pane) []sftppkg.Entry {
+	var all []sftppkg.Entry
+	var filter string
+	if pane == PaneLocal {
+		all = m.LocalEntries
+		filter = m.LocalFilter
+	} else {
+		all = m.RemoteEntries
+		filter = m.RemoteFilter
 	}
-	m.RemoteScroll = 0
+	out := make([]sftppkg.Entry, 0, len(all))
+	q := strings.ToLower(filter)
+	for _, e := range all {
+		if !m.ShowHidden && strings.HasPrefix(e.Name, ".") {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(e.Name), q) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+func (m SftpModel) activeFilter() string {
+	if m.Active == PaneLocal {
+		return m.LocalFilter
+	}
+	return m.RemoteFilter
 }
 
 func (m SftpModel) Init() tea.Cmd { return nil }
 
 func (m SftpModel) paneBodyHeight() int {
-	h := m.Height - 4
+	h := m.Height - 6
 	if h < 3 {
 		h = 3
 	}
@@ -118,6 +155,20 @@ func (m SftpModel) paneBodyHeight() int {
 
 func (m *SftpModel) clampScroll() {
 	body := m.paneBodyHeight()
+	vl := len(m.visible(PaneLocal))
+	vr := len(m.visible(PaneRemote))
+	if m.LocalCursor >= vl {
+		m.LocalCursor = vl - 1
+	}
+	if m.LocalCursor < 0 {
+		m.LocalCursor = 0
+	}
+	if m.RemoteCursor >= vr {
+		m.RemoteCursor = vr - 1
+	}
+	if m.RemoteCursor < 0 {
+		m.RemoteCursor = 0
+	}
 	if m.LocalCursor < m.LocalScroll {
 		m.LocalScroll = m.LocalCursor
 	} else if m.LocalCursor >= m.LocalScroll+body {
@@ -136,6 +187,42 @@ func (m *SftpModel) clampScroll() {
 	}
 }
 
+func (m *SftpModel) appendFilter(s string) {
+	if m.Active == PaneLocal {
+		m.LocalFilter += s
+		m.LocalCursor = 0
+		m.LocalScroll = 0
+	} else {
+		m.RemoteFilter += s
+		m.RemoteCursor = 0
+		m.RemoteScroll = 0
+	}
+}
+
+func (m *SftpModel) popFilter() {
+	if m.Active == PaneLocal {
+		if len(m.LocalFilter) > 0 {
+			m.LocalFilter = m.LocalFilter[:len(m.LocalFilter)-1]
+		}
+	} else {
+		if len(m.RemoteFilter) > 0 {
+			m.RemoteFilter = m.RemoteFilter[:len(m.RemoteFilter)-1]
+		}
+	}
+}
+
+func (m *SftpModel) clearFilter() {
+	if m.Active == PaneLocal {
+		m.LocalFilter = ""
+	} else {
+		m.RemoteFilter = ""
+	}
+	m.LocalCursor = 0
+	m.RemoteCursor = 0
+	m.LocalScroll = 0
+	m.RemoteScroll = 0
+}
+
 func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -148,6 +235,23 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshRemote()
 		return m, nil
 	case tea.KeyMsg:
+		if m.Filtering {
+			switch msg.Type {
+			case tea.KeyEsc:
+				m.clearFilter()
+				m.Filtering = false
+			case tea.KeyEnter:
+				m.Filtering = false
+			case tea.KeyBackspace:
+				m.popFilter()
+			case tea.KeyRunes:
+				m.appendFilter(string(msg.Runes))
+			case tea.KeySpace:
+				m.appendFilter(" ")
+			}
+			m.clampScroll()
+			return m, nil
+		}
 		switch msg.Type {
 		case tea.KeyTab:
 			if m.Active == PaneLocal {
@@ -163,9 +267,10 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.clampScroll()
 		case tea.KeyDown:
-			if m.Active == PaneLocal && m.LocalCursor < len(m.LocalEntries)-1 {
+			vis := m.visible(m.Active)
+			if m.Active == PaneLocal && m.LocalCursor < len(vis)-1 {
 				m.LocalCursor++
-			} else if m.Active == PaneRemote && m.RemoteCursor < len(m.RemoteEntries)-1 {
+			} else if m.Active == PaneRemote && m.RemoteCursor < len(vis)-1 {
 				m.RemoteCursor++
 			}
 			m.clampScroll()
@@ -173,34 +278,16 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			body := m.paneBodyHeight()
 			if m.Active == PaneLocal {
 				m.LocalCursor -= body
-				if m.LocalCursor < 0 {
-					m.LocalCursor = 0
-				}
 			} else {
 				m.RemoteCursor -= body
-				if m.RemoteCursor < 0 {
-					m.RemoteCursor = 0
-				}
 			}
 			m.clampScroll()
 		case tea.KeyPgDown:
 			body := m.paneBodyHeight()
 			if m.Active == PaneLocal {
 				m.LocalCursor += body
-				if m.LocalCursor > len(m.LocalEntries)-1 {
-					m.LocalCursor = len(m.LocalEntries) - 1
-				}
-				if m.LocalCursor < 0 {
-					m.LocalCursor = 0
-				}
 			} else {
 				m.RemoteCursor += body
-				if m.RemoteCursor > len(m.RemoteEntries)-1 {
-					m.RemoteCursor = len(m.RemoteEntries) - 1
-				}
-				if m.RemoteCursor < 0 {
-					m.RemoteCursor = 0
-				}
 			}
 			m.clampScroll()
 		case tea.KeyHome:
@@ -211,172 +298,284 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.clampScroll()
 		case tea.KeyEnd:
+			vis := m.visible(m.Active)
 			if m.Active == PaneLocal {
-				m.LocalCursor = len(m.LocalEntries) - 1
+				m.LocalCursor = len(vis) - 1
 			} else {
-				m.RemoteCursor = len(m.RemoteEntries) - 1
-			}
-			if m.LocalCursor < 0 {
-				m.LocalCursor = 0
-			}
-			if m.RemoteCursor < 0 {
-				m.RemoteCursor = 0
+				m.RemoteCursor = len(vis) - 1
 			}
 			m.clampScroll()
 		case tea.KeyEnter:
-			cmd := m.descend()
+			m.descend()
 			m.clampScroll()
-			return m, cmd
 		case tea.KeyBackspace:
-			cmd := m.ascend()
+			m.ascend()
 			m.clampScroll()
-			return m, cmd
+		case tea.KeySpace:
+			m.toggleSelect()
 		case tea.KeyRunes:
 			switch string(msg.Runes) {
 			case "q":
 				return m, func() tea.Msg { return SftpQuitMsg{} }
 			case "c":
-				return m, m.copy()
+				m.copy()
 			case "d":
-				return m, m.delete()
+				m.delete()
 			case "r":
 				m.refreshLocal()
 				m.refreshRemote()
+			case ".":
+				m.ShowHidden = !m.ShowHidden
+				m.LocalCursor = 0
+				m.RemoteCursor = 0
+				m.LocalScroll = 0
+				m.RemoteScroll = 0
+			case "/":
+				m.Filtering = true
+				m.clearFilter()
+			case "a":
+				m.selectAll()
+			case "A":
+				m.clearSelection()
 			}
 		}
 	}
 	return m, nil
 }
 
-func (m *SftpModel) descend() tea.Cmd {
-	if m.Active == PaneLocal {
-		if m.LocalCursor >= len(m.LocalEntries) {
-			return nil
-		}
-		e := m.LocalEntries[m.LocalCursor]
-		if !e.IsDir {
-			return nil
-		}
-		m.LocalDir = filepath.Join(m.LocalDir, e.Name)
-		m.LocalCursor = 0
-		m.refreshLocal()
-	} else {
-		if m.RemoteCursor >= len(m.RemoteEntries) {
-			return nil
-		}
-		e := m.RemoteEntries[m.RemoteCursor]
-		if !e.IsDir {
-			return nil
-		}
-		m.RemoteDir = sftppkg.Join(m.RemoteDir, e.Name)
-		m.RemoteCursor = 0
-		m.refreshRemote()
+func (m *SftpModel) selectedAt(pane Pane) map[string]bool {
+	if pane == PaneLocal {
+		return m.LocalSelected
 	}
-	return nil
+	return m.RemoteSelected
 }
 
-func (m *SftpModel) ascend() tea.Cmd {
+func (m *SftpModel) toggleSelect() {
+	vis := m.visible(m.Active)
+	var cursor int
+	if m.Active == PaneLocal {
+		cursor = m.LocalCursor
+	} else {
+		cursor = m.RemoteCursor
+	}
+	if cursor < 0 || cursor >= len(vis) {
+		return
+	}
+	e := vis[cursor]
+	if e.IsDir {
+		return
+	}
+	sel := m.selectedAt(m.Active)
+	if sel[e.Name] {
+		delete(sel, e.Name)
+	} else {
+		sel[e.Name] = true
+	}
+}
+
+func (m *SftpModel) selectAll() {
+	vis := m.visible(m.Active)
+	sel := m.selectedAt(m.Active)
+	for _, e := range vis {
+		if !e.IsDir {
+			sel[e.Name] = true
+		}
+	}
+}
+
+func (m *SftpModel) clearSelection() {
+	if m.Active == PaneLocal {
+		m.LocalSelected = map[string]bool{}
+	} else {
+		m.RemoteSelected = map[string]bool{}
+	}
+}
+
+func (m *SftpModel) descend() {
+	vis := m.visible(m.Active)
+	if m.Active == PaneLocal {
+		if m.LocalCursor >= len(vis) {
+			return
+		}
+		e := vis[m.LocalCursor]
+		if !e.IsDir {
+			return
+		}
+		m.LocalDir = filepath.Join(m.LocalDir, e.Name)
+		m.LocalFilter = ""
+		m.refreshLocal()
+	} else {
+		if m.RemoteCursor >= len(vis) {
+			return
+		}
+		e := vis[m.RemoteCursor]
+		if !e.IsDir {
+			return
+		}
+		m.RemoteDir = sftppkg.Join(m.RemoteDir, e.Name)
+		m.RemoteFilter = ""
+		m.refreshRemote()
+	}
+}
+
+func (m *SftpModel) ascend() {
 	if m.Active == PaneLocal {
 		m.LocalDir = filepath.Dir(m.LocalDir)
-		m.LocalCursor = 0
+		m.LocalFilter = ""
 		m.refreshLocal()
 	} else {
 		m.RemoteDir = sftppkg.Parent(m.RemoteDir)
-		m.RemoteCursor = 0
+		m.RemoteFilter = ""
 		m.refreshRemote()
 	}
-	return nil
 }
 
-func (m *SftpModel) copy() tea.Cmd {
+func (m *SftpModel) copy() {
 	if m.Client == nil {
-		return nil
+		return
 	}
-	if m.Active == PaneLocal {
-		if m.LocalCursor >= len(m.LocalEntries) {
-			return nil
+	sel := m.selectedAt(m.Active)
+	vis := m.visible(m.Active)
+
+	targets := []sftppkg.Entry{}
+	if len(sel) > 0 {
+		for _, e := range vis {
+			if sel[e.Name] && !e.IsDir {
+				targets = append(targets, e)
+			}
 		}
-		e := m.LocalEntries[m.LocalCursor]
-		if e.IsDir {
-			m.Err = "directory copy not supported"
-			return nil
-		}
-		src := filepath.Join(m.LocalDir, e.Name)
-		dst := sftppkg.Join(m.RemoteDir, e.Name)
-		if err := m.Client.Upload(src, dst); err != nil {
-			m.Err = err.Error()
-			return nil
-		}
-		m.refreshRemote()
 	} else {
-		if m.RemoteCursor >= len(m.RemoteEntries) {
-			return nil
+		var cursor int
+		if m.Active == PaneLocal {
+			cursor = m.LocalCursor
+		} else {
+			cursor = m.RemoteCursor
 		}
-		e := m.RemoteEntries[m.RemoteCursor]
+		if cursor < 0 || cursor >= len(vis) {
+			return
+		}
+		e := vis[cursor]
 		if e.IsDir {
 			m.Err = "directory copy not supported"
-			return nil
+			return
 		}
-		src := sftppkg.Join(m.RemoteDir, e.Name)
-		dst := filepath.Join(m.LocalDir, e.Name)
-		if err := m.Client.Download(src, dst); err != nil {
-			m.Err = err.Error()
-			return nil
+		targets = append(targets, e)
+	}
+
+	ok := 0
+	for _, e := range targets {
+		if m.Active == PaneLocal {
+			src := filepath.Join(m.LocalDir, e.Name)
+			dst := sftppkg.Join(m.RemoteDir, e.Name)
+			if err := m.Client.Upload(src, dst); err != nil {
+				m.Err = err.Error()
+				return
+			}
+		} else {
+			src := sftppkg.Join(m.RemoteDir, e.Name)
+			dst := filepath.Join(m.LocalDir, e.Name)
+			if err := m.Client.Download(src, dst); err != nil {
+				m.Err = err.Error()
+				return
+			}
 		}
-		m.refreshLocal()
+		ok++
 	}
 	m.Err = ""
-	return nil
+	m.Info = fmt.Sprintf("copied %d file(s)", ok)
+	m.clearSelection()
+	if m.Active == PaneLocal {
+		m.refreshRemote()
+	} else {
+		m.refreshLocal()
+	}
 }
 
-func (m *SftpModel) delete() tea.Cmd {
+func (m *SftpModel) delete() {
+	vis := m.visible(m.Active)
+	var cursor int
 	if m.Active == PaneLocal {
-		if m.LocalCursor >= len(m.LocalEntries) {
-			return nil
-		}
-		e := m.LocalEntries[m.LocalCursor]
+		cursor = m.LocalCursor
+	} else {
+		cursor = m.RemoteCursor
+	}
+	if cursor < 0 || cursor >= len(vis) {
+		return
+	}
+	e := vis[cursor]
+	if m.Active == PaneLocal {
 		target := filepath.Join(m.LocalDir, e.Name)
 		if err := os.Remove(target); err != nil {
 			m.Err = err.Error()
-			return nil
+			return
 		}
 		m.refreshLocal()
 	} else {
-		if m.Client == nil || m.RemoteCursor >= len(m.RemoteEntries) {
-			return nil
+		if m.Client == nil {
+			return
 		}
-		e := m.RemoteEntries[m.RemoteCursor]
 		target := sftppkg.Join(m.RemoteDir, e.Name)
 		if err := m.Client.Delete(target); err != nil {
 			m.Err = err.Error()
-			return nil
+			return
 		}
 		m.refreshRemote()
 	}
 	m.Err = ""
-	return nil
 }
 
 func (m SftpModel) View() string {
-	paneW := (m.Width - 2) / 2
-	if paneW < 20 {
-		paneW = 20
+	paneW := (m.Width - 4) / 2
+	if paneW < 24 {
+		paneW = 24
 	}
-	body := m.paneBodyHeight()
-	left := m.renderPane("Local: "+truncate(m.LocalDir, paneW-10), m.LocalEntries, m.LocalCursor, m.LocalScroll, m.Active == PaneLocal, paneW, body)
-	right := m.renderPane("Remote: "+truncate(m.RemoteDir, paneW-10), m.RemoteEntries, m.RemoteCursor, m.RemoteScroll, m.Active == PaneRemote, paneW, body)
+	paneH := m.Height - 3
+	if paneH < 6 {
+		paneH = 6
+	}
+
+	leftTitle := "Local: " + truncate(m.LocalDir, paneW-10)
+	rightTitle := "Remote: " + truncate(m.RemoteDir, paneW-11)
+	left := m.renderPane(leftTitle, m.visible(PaneLocal), m.LocalCursor, m.LocalScroll, m.LocalSelected, m.LocalFilter, m.Active == PaneLocal, paneW, paneH)
+	right := m.renderPane(rightTitle, m.visible(PaneRemote), m.RemoteCursor, m.RemoteScroll, m.RemoteSelected, m.RemoteFilter, m.Active == PaneRemote, paneW, paneH)
 	joined := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	help := StyleHelp.Render("[Tab] switch  [Enter] open  [Bksp] up  [c] copy  [d] del  [r] refresh  [PgUp/PgDn] page  [q] back")
+
+	hints := "[Tab] switch  [Enter] open  [Bksp] up  [Space] select  [c] copy  [d] del  [/] find  [.] hidden  [a]/[A] all/clear  [r] refresh  [q] back"
+	if m.Filtering {
+		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
+	}
+	help := StyleHelp.Render(hints)
 	if m.Err != "" {
 		help = StyleError.Render(m.Err) + "\n" + help
+	} else if m.Info != "" {
+		help = StyleHelp.Render(m.Info) + "\n" + help
 	}
 	return joined + "\n" + help
 }
 
-func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scroll int, active bool, width, body int) string {
+func paneLabel(p Pane) string {
+	if p == PaneLocal {
+		return "local"
+	}
+	return "remote"
+}
+
+func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scroll int, selected map[string]bool, filter string, active bool, width, height int) string {
+	innerH := height - 2
+	body := innerH - 2
+	if body < 1 {
+		body = 1
+	}
+
 	var b strings.Builder
 	b.WriteString(StyleTitle.Render(title))
 	b.WriteString("\n")
+
+	nameW := width - 8
+	if nameW < 8 {
+		nameW = 8
+	}
+
 	if len(entries) == 0 {
 		b.WriteString(StyleHelp.Render("  (empty)"))
 		b.WriteString("\n")
@@ -385,10 +584,6 @@ func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scr
 		if end > len(entries) {
 			end = len(entries)
 		}
-		nameW := width - 6
-		if nameW < 8 {
-			nameW = 8
-		}
 		for i := scroll; i < end; i++ {
 			e := entries[i]
 			name := e.Name
@@ -396,24 +591,47 @@ func (m SftpModel) renderPane(title string, entries []sftppkg.Entry, cursor, scr
 				name += "/"
 			}
 			name = truncate(name, nameW)
-			line := fmt.Sprintf("  %s", name)
+			marker := " "
+			if selected[e.Name] {
+				marker = "*"
+			}
+			line := fmt.Sprintf(" %s %s", marker, name)
 			if i == cursor {
-				line = StyleSelected.Render("> " + name)
+				line = StyleSelected.Render(">" + marker + " " + name)
+			} else if selected[e.Name] {
+				line = StyleError.Render(line)
 			} else {
 				line = StyleNormal.Render(line)
 			}
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
-		if len(entries) > body {
-			b.WriteString(StyleHelp.Render(fmt.Sprintf("  [%d/%d]", cursor+1, len(entries))))
+	}
+
+	footer := ""
+	if filter != "" {
+		footer = fmt.Sprintf("filter: %s", filter)
+	}
+	if len(entries) > 0 {
+		count := fmt.Sprintf("[%d/%d]", cursor+1, len(entries))
+		if len(selected) > 0 {
+			count += fmt.Sprintf(" sel:%d", len(selected))
+		}
+		if footer != "" {
+			footer = footer + "  " + count
+		} else {
+			footer = count
 		}
 	}
+	if footer != "" {
+		b.WriteString(StyleHelp.Render(truncate(footer, width-4)))
+	}
+
 	style := StylePaneInactive
 	if active {
 		style = StylePaneActive
 	}
-	return style.Width(width).Height(body + 2).Render(b.String())
+	return style.Width(width).Height(innerH).Render(b.String())
 }
 
 func truncate(s string, n int) string {
