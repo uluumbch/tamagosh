@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -19,7 +20,13 @@ const (
 	ModeForm
 	ModeConfirmDelete
 	ModeSftp
+	ModeConnecting
 )
+
+type startSshMsg struct {
+	conn config.Connection
+	pwd  string
+}
 
 type PassStore interface {
 	Get(key string) (string, error)
@@ -78,6 +85,8 @@ func (a AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 	case ConnectMsg:
 		return a.handleConnect(m.Conn)
+	case startSshMsg:
+		return a, ssh.ConnectCmd(m.conn, m.pwd)
 	case ssh.ExitMsg:
 		if m.Err != nil {
 			a.List.Err = "ssh exited: " + m.Err.Error()
@@ -196,7 +205,11 @@ func (a AppModel) handleConnect(c config.Connection) (tea.Model, tea.Cmd) {
 		a.List.Err = "pass: " + err.Error()
 		return a, nil
 	}
-	return a, ssh.ConnectCmd(c, pwd)
+	a.Pending = c
+	a.Mode = ModeConnecting
+	return a, tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return startSshMsg{conn: c, pwd: pwd}
+	})
 }
 
 func (a AppModel) handleSftp(c config.Connection) (tea.Model, tea.Cmd) {
@@ -238,6 +251,11 @@ func (a AppModel) View() string {
 			StyleTitle.Render("Delete connection") + "\n\n" +
 				fmt.Sprintf("  Delete %q? [y/N]", a.Pending.Name),
 		)
+	case ModeConnecting:
+		body := StyleTitle.Render("Connecting") + "\n\n" +
+			fmt.Sprintf("  → %s@%s:%d", a.Pending.User, a.Pending.Host, a.Pending.Port) + "\n" +
+			StyleHelp.Render("  establishing SSH session...")
+		return StyleBorder.Render(body)
 	default:
 		return a.List.View()
 	}

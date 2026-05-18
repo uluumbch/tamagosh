@@ -23,6 +23,11 @@ const (
 type SftpQuitMsg struct{}
 type SftpErrorMsg struct{ Err error }
 type SftpRefreshMsg struct{}
+type SftpProgressMsg struct {
+	Idx, Total int
+	Name       string
+	Err        error
+}
 
 type SftpModel struct {
 	Client         *sftppkg.Client
@@ -40,11 +45,15 @@ type SftpModel struct {
 	RemoteFilter   string
 	Filtering      bool
 	ShowHidden     bool
-	Active         Pane
-	Width          int
-	Height         int
-	Err            string
-	Info           string
+	Active           Pane
+	Width            int
+	Height           int
+	Err              string
+	Info             string
+	TransferActive   bool
+	TransferTotal    int
+	TransferDone     int
+	TransferName     string
 }
 
 func NewSftpModel(client *sftppkg.Client, localDir, remoteDir string) SftpModel {
@@ -234,6 +243,25 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		m.refreshRemote()
 		return m, nil
+	case SftpProgressMsg:
+		m.TransferDone = msg.Idx
+		m.TransferName = msg.Name
+		if msg.Err != nil {
+			m.Err = msg.Err.Error()
+			m.TransferActive = false
+			return m, nil
+		}
+		if msg.Idx >= msg.Total {
+			m.TransferActive = false
+			m.Info = fmt.Sprintf("copied %d file(s)", msg.Total)
+			m.clearSelection()
+			if m.Active == PaneLocal {
+				m.refreshRemote()
+			} else {
+				m.refreshLocal()
+			}
+		}
+		return m, nil
 	case tea.KeyMsg:
 		if m.Filtering {
 			switch msg.Type {
@@ -318,7 +346,7 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "q":
 				return m, func() tea.Msg { return SftpQuitMsg{} }
 			case "c":
-				m.copy()
+				return m, m.copy()
 			case "d":
 				m.delete()
 			case "r":
@@ -430,9 +458,9 @@ func (m *SftpModel) ascend() {
 	}
 }
 
-func (m *SftpModel) copy() {
+func (m *SftpModel) copy() tea.Cmd {
 	if m.Client == nil {
-		return
+		return nil
 	}
 	sel := m.selectedAt(m.Active)
 	vis := m.visible(m.Active)
@@ -452,43 +480,52 @@ func (m *SftpModel) copy() {
 			cursor = m.RemoteCursor
 		}
 		if cursor < 0 || cursor >= len(vis) {
-			return
+			return nil
 		}
 		e := vis[cursor]
 		if e.IsDir {
 			m.Err = "directory copy not supported"
-			return
+			return nil
 		}
 		targets = append(targets, e)
 	}
 
-	ok := 0
-	for _, e := range targets {
-		if m.Active == PaneLocal {
-			src := filepath.Join(m.LocalDir, e.Name)
-			dst := sftppkg.Join(m.RemoteDir, e.Name)
-			if err := m.Client.Upload(src, dst); err != nil {
-				m.Err = err.Error()
-				return
-			}
-		} else {
-			src := sftppkg.Join(m.RemoteDir, e.Name)
-			dst := filepath.Join(m.LocalDir, e.Name)
-			if err := m.Client.Download(src, dst); err != nil {
-				m.Err = err.Error()
-				return
-			}
-		}
-		ok++
+	if len(targets) == 0 {
+		return nil
 	}
+
 	m.Err = ""
-	m.Info = fmt.Sprintf("copied %d file(s)", ok)
-	m.clearSelection()
-	if m.Active == PaneLocal {
-		m.refreshRemote()
-	} else {
-		m.refreshLocal()
+	m.Info = ""
+	m.TransferActive = true
+	m.TransferTotal = len(targets)
+	m.TransferDone = 0
+	m.TransferName = targets[0].Name
+
+	dir := m.Active
+	client := m.Client
+	localDir := m.LocalDir
+	remoteDir := m.RemoteDir
+	total := len(targets)
+
+	cmds := make([]tea.Cmd, 0, len(targets))
+	for i, e := range targets {
+		idx := i + 1
+		ent := e
+		cmds = append(cmds, func() tea.Msg {
+			var err error
+			if dir == PaneLocal {
+				src := filepath.Join(localDir, ent.Name)
+				dst := sftppkg.Join(remoteDir, ent.Name)
+				err = client.Upload(src, dst)
+			} else {
+				src := sftppkg.Join(remoteDir, ent.Name)
+				dst := filepath.Join(localDir, ent.Name)
+				err = client.Download(src, dst)
+			}
+			return SftpProgressMsg{Idx: idx, Total: total, Name: ent.Name, Err: err}
+		})
 	}
+	return tea.Sequence(cmds...)
 }
 
 func (m *SftpModel) delete() {
@@ -545,12 +582,27 @@ func (m SftpModel) View() string {
 		hints = fmt.Sprintf("filter (%s): %s_  [Enter] apply  [Esc] cancel", paneLabel(m.Active), m.activeFilter())
 	}
 	help := StyleHelp.Render(hints)
-	if m.Err != "" {
+	if m.TransferActive {
+		bar := transferBar(m.TransferDone, m.TransferTotal, 20)
+		status := fmt.Sprintf("transferring %d/%d %s  %s", m.TransferDone, m.TransferTotal, bar, truncate(m.TransferName, 40))
+		help = StyleSelected.Render(status) + "\n" + help
+	} else if m.Err != "" {
 		help = StyleError.Render(m.Err) + "\n" + help
 	} else if m.Info != "" {
 		help = StyleHelp.Render(m.Info) + "\n" + help
 	}
 	return joined + "\n" + help
+}
+
+func transferBar(done, total, width int) string {
+	if total <= 0 {
+		return ""
+	}
+	filled := done * width / total
+	if filled > width {
+		filled = width
+	}
+	return "[" + strings.Repeat("=", filled) + strings.Repeat("-", width-filled) + "]"
 }
 
 func paneLabel(p Pane) string {
