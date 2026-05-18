@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/candratama/sshm/internal/config"
 )
@@ -134,19 +135,29 @@ func (m FormModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m FormModel) View() string {
+	const innerW = 48
+
 	var b strings.Builder
 	title := "New Connection"
 	if m.IsEdit {
 		title = "Edit " + m.Original
 	}
-	b.WriteString(StyleTitle.Render(title))
+	titleLine := lipgloss.NewStyle().
+		Width(innerW).
+		Align(lipgloss.Center).
+		Bold(true).
+		Foreground(lipgloss.Color(gbYellow)).
+		Render(title)
+	b.WriteString(titleLine)
 	b.WriteString("\n\n")
+
+	const leftPad = "          "
 	for i, f := range m.Fields {
 		val := f.Value
 		if f.Secret {
 			val = strings.Repeat("*", len(f.Value))
 		}
-		line := fmt.Sprintf("  %-9s : %s", f.Label, val)
+		line := fmt.Sprintf("%s%-9s : %s", leftPad, f.Label, val)
 		if i == m.Focus {
 			line = StyleSelected.Render(line + "_")
 		} else {
@@ -156,10 +167,25 @@ func (m FormModel) View() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(StyleHelp.Render("  [Enter] save   [Esc] cancel   [Tab] next"))
+	hint := lipgloss.NewStyle().
+		Width(innerW).
+		Align(lipgloss.Center).
+		Foreground(lipgloss.Color(gbFgMute)).
+		Render("[Enter] save   [Esc] cancel   [Tab] next")
+	b.WriteString(hint)
 	if m.Err != "" {
 		b.WriteString("\n")
-		b.WriteString(StyleError.Render("  " + m.Err))
+		errLine := lipgloss.NewStyle().
+			Width(innerW).
+			Align(lipgloss.Center).
+			Foreground(lipgloss.Color(gbRed)).
+			Bold(true).
+			Render(m.Err)
+		b.WriteString(errLine)
 	}
-	return StyleBorder.Render(b.String())
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(gbAqua)).
+		Padding(1, 2).
+		Render(b.String())
 }
