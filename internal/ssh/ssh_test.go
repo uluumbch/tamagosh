@@ -13,23 +13,29 @@ func TestBuildCommand(t *testing.T) {
 	if name != "sshpass" {
 		t.Fatalf("name=%q", name)
 	}
-	if len(args) != 8 {
-		t.Fatalf("args len=%d want 8 (%v)", len(args), args)
+	if len(args) != 7 {
+		t.Fatalf("args len=%d want 7 (%v)", len(args), args)
 	}
-	if args[0] != "-p" || args[1] != "hunter2" {
-		t.Fatalf("password arg wrong: %v", args[:2])
+	if args[0] != "-e" {
+		t.Fatalf("expected -e (env mode), got %q", args[0])
 	}
-	if !strings.HasSuffix(args[2], "ssh") {
-		t.Fatalf("ssh binary path doesn't end with 'ssh': %q", args[2])
+	if !strings.HasSuffix(args[1], "ssh") {
+		t.Fatalf("ssh binary path doesn't end with 'ssh': %q", args[1])
 	}
-	if args[3] != "-p" || args[4] != "2255" {
-		t.Fatalf("port arg wrong: %v", args[3:5])
+	if args[2] != "-p" || args[3] != "2255" {
+		t.Fatalf("port arg wrong: %v", args[2:4])
 	}
-	if args[5] != "-o" || args[6] != "StrictHostKeyChecking=accept-new" {
-		t.Fatalf("strict host key opt wrong: %v", args[5:7])
+	if args[4] != "-o" || args[5] != "StrictHostKeyChecking=accept-new" {
+		t.Fatalf("strict host key opt wrong: %v", args[4:6])
 	}
-	if args[7] != "candra@43.228.213.209" {
-		t.Fatalf("user@host wrong: %q", args[7])
+	if args[6] != "candra@43.228.213.209" {
+		t.Fatalf("user@host wrong: %q", args[6])
+	}
+	// password must NOT appear anywhere in args
+	for i, a := range args {
+		if a == "hunter2" {
+			t.Fatalf("password leaked into args[%d]", i)
+		}
 	}
 }
 

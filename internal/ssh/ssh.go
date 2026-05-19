@@ -2,6 +2,7 @@ package ssh
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -9,7 +10,10 @@ import (
 	"github.com/Candratama/tamagosh/internal/config"
 )
 
-func BuildCommand(c config.Connection, password string) (string, []string) {
+// BuildCommand returns the sshpass invocation WITHOUT the password.
+// Password is passed via SSHPASS env var (see ConnectCmd) to avoid leaking
+// through process listings (`ps aux`).
+func BuildCommand(c config.Connection, _ string) (string, []string) {
 	port := c.Port
 	if port == 0 {
 		port = 22
@@ -19,7 +23,7 @@ func BuildCommand(c config.Connection, password string) (string, []string) {
 		sshBin = p
 	}
 	args := []string{
-		"-p", password,
+		"-e",
 		sshBin,
 		"-p", fmt.Sprintf("%d", port),
 		"-o", "StrictHostKeyChecking=accept-new",
@@ -35,6 +39,8 @@ type ExitMsg struct {
 func ConnectCmd(c config.Connection, password string) tea.Cmd {
 	name, args := BuildCommand(c, password)
 	cmd := exec.Command(name, args...)
+	// Pass password via SSHPASS env so it never appears in process args.
+	cmd.Env = append(os.Environ(), "SSHPASS="+password)
 	return tea.ExecProcess(cmd, func(err error) tea.Msg {
 		return ExitMsg{Err: err}
 	})
