@@ -131,13 +131,17 @@ func preflight() error {
 	if _, err := exec.LookPath("ssh"); err != nil {
 		return fmt.Errorf("ssh not found in PATH — install OpenSSH client")
 	}
+	// sshpass is only required for password-auth connections. Key auth works
+	// without it. Warn instead of fail so key-only users aren't forced to
+	// install it. SSH connect will emit a clear error if a password connection
+	// is selected and sshpass isn't present.
 	if _, err := exec.LookPath("sshpass"); err != nil {
 		hint := "brew install hudochenkov/sshpass/sshpass  (macOS)"
 		switch runtime.GOOS {
 		case "linux":
 			hint = "apt-get install sshpass  /  pacman -S sshpass  /  dnf install sshpass"
 		}
-		return fmt.Errorf("sshpass not installed — %s", hint)
+		fmt.Fprintf(os.Stderr, "note: sshpass not installed — password auth disabled, key auth works (%s)\n", hint)
 	}
 
 	cfgPath, err := config.DefaultPath()
