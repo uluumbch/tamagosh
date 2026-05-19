@@ -1,4 +1,4 @@
-# tamagosh
+# TAMAGOSH
 
 A cozy little terminal SSH manager with a built-in SFTP browser. Pet your servers, don't lose them.
 
