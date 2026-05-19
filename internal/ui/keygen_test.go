@@ -50,3 +50,31 @@ func TestKeygenModelRejectsEmptyName(t *testing.T) {
 		t.Fatal("expected error for empty name")
 	}
 }
+
+func TestKeygenModelRejectsBadNames(t *testing.T) {
+	cases := []string{".", "..", ".hidden", "foo bar", "foo/bar", "foo\\bar", "foo\x00bar", "-leading-hyphen"}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := NewKeygenModel(dir)
+			m.NameField.Value = name
+			if err := m.Generate(); err == nil {
+				t.Fatalf("expected error for name %q", name)
+			}
+		})
+	}
+}
+
+func TestKeygenModelAcceptsValidNames(t *testing.T) {
+	cases := []string{"id_ed25519", "my-key", "prod.staging", "key1", "_underscore"}
+	for _, name := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			m := NewKeygenModel(dir)
+			m.NameField.Value = name
+			if err := m.Generate(); err != nil {
+				t.Fatalf("name %q unexpectedly rejected: %v", name, err)
+			}
+		})
+	}
+}

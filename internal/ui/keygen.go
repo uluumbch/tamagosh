@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,6 +11,11 @@ import (
 
 	"github.com/Candratama/tamagosh/internal/keygen"
 )
+
+// validKeyName rejects path separators, traversal, NUL bytes, and hidden-file
+// patterns. Positive allowlist: must start with [a-zA-Z0-9_], then any of
+// [a-zA-Z0-9._-]. Catches `.`, `..`, `.hidden`, `foo/bar`, `foo\x00bar`.
+var validKeyName = regexp.MustCompile(`^[a-zA-Z0-9_][a-zA-Z0-9._-]*$`)
 
 type KeygenStartMsg struct{}
 type KeygenCancelMsg struct{}
@@ -48,8 +54,8 @@ func (m KeygenModel) Generate() error {
 	if name == "" {
 		return fmt.Errorf("name required")
 	}
-	if strings.ContainsAny(name, "/\\") || strings.Contains(name, "..") {
-		return fmt.Errorf("name cannot contain path separators or '..'")
+	if !validKeyName.MatchString(name) {
+		return fmt.Errorf("name must match [a-zA-Z0-9_][a-zA-Z0-9._-]* (no path separators, no '.'/'..')")
 	}
 	return keygen.Generate(m.TargetPath(), m.PassphraseField.Value)
 }
