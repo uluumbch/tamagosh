@@ -19,6 +19,12 @@ import (
 func main() {
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
+		case "askpass":
+			// Internal subcommand invoked by ssh via SSH_ASKPASS.
+			// Prints $TAMAGOSH_PASSPHRASE followed by newline to stdout.
+			// Never logs, never reads files.
+			fmt.Println(os.Getenv("TAMAGOSH_PASSPHRASE"))
+			return
 		case "uninstall":
 			uninstall()
 			return

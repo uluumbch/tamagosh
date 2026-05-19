@@ -66,8 +66,48 @@ func ConnectCmd(c config.Connection, secret string) tea.Cmd {
 
 	switch c.AuthMethod {
 	case "key":
-		// Task 5 will wire SSH_ASKPASS for passphrase-protected keys.
-		// For now, exec ssh directly; if the key is encrypted ssh will fail or prompt on TTY.
+		if secret != "" {
+			self, err := os.Executable()
+			if err != nil {
+				break
+			}
+			// ssh execs SSH_ASKPASS directly (no shell, no args), so we need
+			// a single executable. A tiny /bin/sh script that execs ourselves
+			// with the `askpass` subcommand does the job.
+			script := fmt.Sprintf("#!/bin/sh\nexec %q askpass\n", self)
+			f, err := os.CreateTemp("", "tamagosh-askpass-*.sh")
+			if err != nil {
+				break
+			}
+			if _, err := f.WriteString(script); err != nil {
+				f.Close()
+				os.Remove(f.Name())
+				break
+			}
+			f.Close()
+			if err := os.Chmod(f.Name(), 0o700); err != nil {
+				os.Remove(f.Name())
+				break
+			}
+			// No cleanup: tea.ExecProcess takes ownership of the subprocess,
+			// so there's no place to defer removal. The script lives in /tmp
+			// with 0700 perms and contains only an exec stub (no secret on
+			// disk). The system tmp reaper handles it. Intentional.
+			env = append(env,
+				"TAMAGOSH_PASSPHRASE="+secret,
+				"SSH_ASKPASS="+f.Name(),
+				"SSH_ASKPASS_REQUIRE=force",
+				"DISPLAY=:0",
+			)
+			// ssh prefers the controlling TTY over SSH_ASKPASS. setsid detaches
+			// the child from the TTY so ASKPASS is consulted. Best-effort —
+			// if setsid is unavailable (rare on macOS Homebrew, mostly Linux),
+			// fall through and let ssh prompt on the TTY (cosmetic glitch).
+			if setsid, err := exec.LookPath("setsid"); err == nil {
+				newArgs := append([]string{name}, args...)
+				cmd = exec.Command(setsid, newArgs...)
+			}
+		}
 	default:
 		env = append(env, "SSHPASS="+secret)
 	}
