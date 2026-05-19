@@ -87,6 +87,7 @@ type SftpModel struct {
 	SortAsc        bool
 	ShowInfo       bool
 	ShowHelp       bool
+	HelpScroll     int
 	InfoEntry      sftppkg.Entry
 	Bookmark       *bookmark.Store
 	BookmarkScope  string
@@ -407,7 +408,30 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.ShowHelp {
+			switch msg.Type {
+			case tea.KeyUp:
+				if m.HelpScroll > 0 {
+					m.HelpScroll--
+				}
+				return m, nil
+			case tea.KeyDown:
+				m.HelpScroll++
+				return m, nil
+			case tea.KeyPgUp:
+				m.HelpScroll -= 5
+				if m.HelpScroll < 0 {
+					m.HelpScroll = 0
+				}
+				return m, nil
+			case tea.KeyPgDown:
+				m.HelpScroll += 5
+				return m, nil
+			case tea.KeyHome:
+				m.HelpScroll = 0
+				return m, nil
+			}
 			m.ShowHelp = false
+			m.HelpScroll = 0
 			return m, nil
 		}
 		if len(m.BookmarkList) > 0 {
@@ -1135,7 +1159,12 @@ func (m SftpModel) View() string {
 	var overlay string
 	switch {
 	case m.ShowHelp:
-		overlay = renderHelpBox(min(m.Width-4, 78))
+		// reserve some space for borders + bottom rows
+		maxRows := m.Height - 6
+		if maxRows < 10 {
+			maxRows = 10
+		}
+		overlay = renderHelpBox(min(m.Width-4, 78), maxRows, &m.HelpScroll)
 	case m.ShowInfo:
 		overlay = renderInfoBox(m.InfoEntry, m.Active, m.LocalDir, m.RemoteDir, min(boxW, 70))
 	case len(m.BookmarkList) > 0:
@@ -1332,7 +1361,7 @@ func centerTitle(body, title string) string {
 	return titleLine + "\n" + body
 }
 
-func renderHelpBox(width int) string {
+func renderHelpBox(width, maxRows int, scroll *int) string {
 	groups := []struct {
 		title string
 		keys  []keyHint
@@ -1382,26 +1411,52 @@ func renderHelpBox(width int) string {
 		}},
 	}
 
-	var b strings.Builder
+	var lines []string
 	for gi, g := range groups {
 		if gi > 0 {
-			b.WriteString("\n")
+			lines = append(lines, "")
 		}
-		b.WriteString(StyleSection.Render(g.title))
-		b.WriteString("\n")
+		lines = append(lines, StyleSection.Render(g.title))
 		for _, k := range g.keys {
 			line := StyleKeyBracket.Render("[") +
 				StyleKey.Render(k.Key) +
 				StyleKeyBracket.Render("] ") +
 				StyleKeyLabel.Render(k.Label)
-			b.WriteString(line)
-			b.WriteString("\n")
+			lines = append(lines, line)
 		}
 	}
-	b.WriteString("\n")
-	b.WriteString(StyleHelp.Render("press any key to close"))
+
+	total := len(lines)
+	// reserve 2 lines: scroll indicator + close hint
+	visible := maxRows - 2
+	if visible < 5 {
+		visible = 5
+	}
+
+	if *scroll < 0 {
+		*scroll = 0
+	}
+	maxScroll := total - visible
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+	if *scroll > maxScroll {
+		*scroll = maxScroll
+	}
+
+	end := *scroll + visible
+	if end > total {
+		end = total
+	}
+	chunk := lines[*scroll:end]
+
+	body := strings.Join(chunk, "\n")
+	if total > visible {
+		body += "\n" + StyleHelp.Render(fmt.Sprintf("  [%d-%d/%d]  ↑/↓ scroll  PgUp/PgDn page", *scroll+1, end, total))
+	}
+	body += "\n" + StyleHelp.Render("press any other key to close")
 	_ = width
-	return StyleBorder.Render(centerTitle(b.String(), "Keyboard shortcuts"))
+	return StyleBorder.Render(centerTitle(body, "Keyboard shortcuts"))
 }
 
 func renderConfirmBox(action string, targets []sftppkg.Entry, maxWidth int) string {
