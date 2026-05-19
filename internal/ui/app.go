@@ -123,7 +123,8 @@ func (a AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.Keygen.Err = m.Err.Error()
 			return a, nil
 		}
-		a.List.Err = "generated: " + m.Path
+		a.List.Err = ""
+		a.List.Info = "generated: " + m.Path
 		a.Mode = ModeList
 		return a, nil
 	case SftpQuitMsg:

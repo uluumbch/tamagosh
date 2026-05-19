@@ -22,6 +22,7 @@ type ListModel struct {
 	Filter    string
 	Filtering bool
 	Err       string
+	Info      string // success / informational toast (rendered green)
 }
 
 func NewListModel(s *config.Store) ListModel {
@@ -165,6 +166,10 @@ func (m ListModel) View() string {
 		b.WriteString(StyleHelp.Render(fmt.Sprintf("  /%s_", m.Filter)))
 	} else {
 		b.WriteString(StyleHelp.Render("  [n]ew [e]dit [d]el [f]sftp [K]eygen [/]find [q]uit"))
+	}
+	if m.Info != "" {
+		b.WriteString("\n")
+		b.WriteString(StyleSuccess.Render("  " + m.Info))
 	}
 	if m.Err != "" {
 		b.WriteString("\n")
