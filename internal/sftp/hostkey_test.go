@@ -1,6 +1,8 @@
 package sftp
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -53,5 +55,41 @@ func TestHostKeyCallbackAppendsOnFirstConnect(t *testing.T) {
 	}
 	if err := cb2("192.0.2.10:22", addr, pk); err != nil {
 		t.Fatalf("second connect (same key): %v", err)
+	}
+}
+
+func TestHostKeyCallbackRejectsMismatch(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+	cb, err := hostKeyCallback(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr, _ := net.ResolveTCPAddr("tcp", "192.0.2.10:22")
+
+	// First connect with fixture key — appends to known_hosts.
+	if err := cb("192.0.2.10:22", addr, makeTestHostKey(t)); err != nil {
+		t.Fatalf("first connect: %v", err)
+	}
+
+	// Second connect with a DIFFERENT key for the SAME host must error.
+	otherPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherKey, err := ssh.NewPublicKey(otherPub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cb2, err := hostKeyCallback(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cb2("192.0.2.10:22", addr, otherKey)
+	if err == nil {
+		t.Fatal("expected mismatch error, got nil — MITM protection broken")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("error should mention mismatch, got: %v", err)
 	}
 }

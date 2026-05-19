@@ -16,6 +16,11 @@ import (
 //   - verifies against the known_hosts at khPath when an entry exists
 //   - appends a new entry on first connect (parity with ssh's accept-new)
 //   - returns an error on host key mismatch (does NOT silently accept)
+//
+// Concurrency note: two simultaneous first-connects to the same new host can
+// both pass the "no entry" check and both append, producing a duplicate line.
+// OpenSSH tolerates duplicates and tamagosh opens one SFTP session at a time
+// per app instance, so this is accepted rather than locked.
 func hostKeyCallback(khPath string) (ssh.HostKeyCallback, error) {
 	if err := os.MkdirAll(filepath.Dir(khPath), 0o700); err != nil {
 		return nil, err

@@ -93,12 +93,24 @@ func ConnectCmd(c config.Connection, secret string) tea.Cmd {
 			// so there's no place to defer removal. The script lives in /tmp
 			// with 0700 perms and contains only an exec stub (no secret on
 			// disk). The system tmp reaper handles it. Intentional.
+			//
+			// Security note: TAMAGOSH_PASSPHRASE is inherited by the ssh child
+			// process. This is unavoidable — ssh consults SSH_ASKPASS after
+			// fork/exec, so the env must be set on the ssh process. The
+			// passphrase is visible via /proc/<pid>/environ to the owning user
+			// only (process credentials enforce read access). Remote shells do
+			// NOT receive it: ssh does not forward env vars by default.
 			env = append(env,
 				"TAMAGOSH_PASSPHRASE="+secret,
 				"SSH_ASKPASS="+f.Name(),
 				"SSH_ASKPASS_REQUIRE=force",
-				"DISPLAY=:0",
 			)
+			// Only set DISPLAY if not already set — preserves the user's X11
+			// configuration. SSH_ASKPASS_REQUIRE=force only consults DISPLAY
+			// on older OpenSSH; modern versions ignore it when REQUIRE=force.
+			if os.Getenv("DISPLAY") == "" {
+				env = append(env, "DISPLAY=:0")
+			}
 			// ssh prefers the controlling TTY over SSH_ASKPASS. setsid detaches
 			// the child from the TTY so ASKPASS is consulted. Best-effort —
 			// if setsid is unavailable (rare on macOS Homebrew, mostly Linux),
