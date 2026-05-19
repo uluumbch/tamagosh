@@ -147,12 +147,9 @@ func (m ListModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m ListModel) View() string {
 	visible := m.Visible()
 
-	// Build the row block. Each row uses fixed-width columns so the
-	// host/port columns line up. We compute the max rendered width to
-	// horizontally center the whole block inside the box.
 	type styledLine struct {
 		text  string
-		plain string // unstyled, for width measurement
+		plain string
 	}
 	var rows []styledLine
 
@@ -171,7 +168,6 @@ func (m ListModel) View() string {
 		rows = append(rows, styledLine{text: styled, plain: raw})
 	}
 
-	// Footer (filter prompt OR shortcut hint).
 	var footer styledLine
 	if m.Filtering {
 		raw := fmt.Sprintf("/%s_", m.Filter)
@@ -181,49 +177,56 @@ func (m ListModel) View() string {
 		footer = styledLine{text: StyleHelp.Render(raw), plain: raw}
 	}
 
-	// Find the widest plain row to align everything against.
-	maxW := lipgloss.Width(footer.plain)
-	for _, r := range rows {
-		if w := lipgloss.Width(r.plain); w > maxW {
-			maxW = w
-		}
-	}
 	title := "Connection List"
-	if w := lipgloss.Width(title); w > maxW {
-		maxW = w
-	}
 
-	pad := func(s string, w int) string {
-		gap := maxW - w
-		if gap <= 0 {
-			return s
+	// widest content line drives the box's natural width.
+	widestRow := 0
+	for _, r := range rows {
+		if w := lipgloss.Width(r.plain); w > widestRow {
+			widestRow = w
 		}
-		half := gap / 2
-		return strings.Repeat(" ", half) + s
 	}
+	contentW := widestRow
+	if w := lipgloss.Width(footer.plain); w > contentW {
+		contentW = w
+	}
+	if w := lipgloss.Width(title); w > contentW {
+		contentW = w
+	}
+	// breathing room on both sides so rows don't hug edges
+	const sidePad = 6
+	targetW := contentW + sidePad*2
+
+	// Uniform left shift for the row block — same pad for every row, so
+	// columns stay vertically aligned and the whole block sits centered.
+	rowShift := (targetW - widestRow) / 2
 
 	var b strings.Builder
 	titleStyled := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color(gbYellow)).
 		Render(title)
-	b.WriteString(pad(titleStyled, lipgloss.Width(title)))
+	b.WriteString(lipgloss.PlaceHorizontal(targetW, lipgloss.Center, titleStyled))
 	b.WriteString("\n\n")
 
+	shift := strings.Repeat(" ", rowShift)
 	for _, r := range rows {
-		b.WriteString(pad(r.text, lipgloss.Width(r.plain)))
+		// pad row block uniformly on the left; right side fills with spaces
+		// up to targetW so the box width is stable.
+		line := lipgloss.PlaceHorizontal(targetW, lipgloss.Left, shift+r.text)
+		b.WriteString(line)
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(pad(footer.text, lipgloss.Width(footer.plain)))
+	b.WriteString(lipgloss.PlaceHorizontal(targetW, lipgloss.Center, footer.text))
 
 	if m.Info != "" {
 		b.WriteString("\n")
-		b.WriteString(pad(StyleSuccess.Render(m.Info), lipgloss.Width(m.Info)))
+		b.WriteString(lipgloss.PlaceHorizontal(targetW, lipgloss.Center, StyleSuccess.Render(m.Info)))
 	}
 	if m.Err != "" {
 		b.WriteString("\n")
-		b.WriteString(pad(StyleError.Render(m.Err), lipgloss.Width(m.Err)))
+		b.WriteString(lipgloss.PlaceHorizontal(targetW, lipgloss.Center, StyleError.Render(m.Err)))
 	}
 	box := StyleBorder.Render(b.String())
 	return lipgloss.JoinVertical(lipgloss.Center, renderHeader(), "", box)
