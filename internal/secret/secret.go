@@ -154,3 +154,17 @@ func (s *Store) Delete(key string) error {
 	delete(m, key)
 	return s.writeSecrets(m)
 }
+
+const passphraseSuffix = ":passphrase"
+
+func (s *Store) GetPassphrase(key string) (string, error) {
+	return s.Get(key + passphraseSuffix)
+}
+
+func (s *Store) SetPassphrase(key, value string) error {
+	return s.Set(key+passphraseSuffix, value)
+}
+
+func (s *Store) DeletePassphrase(key string) error {
+	return s.Delete(key + passphraseSuffix)
+}
