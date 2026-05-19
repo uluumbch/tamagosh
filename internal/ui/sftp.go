@@ -1168,12 +1168,7 @@ func (m SftpModel) View() string {
 	var overlay string
 	switch {
 	case m.ShowHelp:
-		// reserve some space for borders + bottom rows
-		maxRows := m.Height - 6
-		if maxRows < 10 {
-			maxRows = 10
-		}
-		overlay = renderHelpBox(min(m.Width-4, 78), maxRows, &m.HelpScroll)
+		overlay = renderHelpBox(min(m.Width-4, 78), contentH, &m.HelpScroll)
 	case m.ShowInfo:
 		overlay = renderInfoBox(m.InfoEntry, m.Active, m.LocalDir, m.RemoteDir, min(boxW, 70))
 	case len(m.BookmarkList) > 0:
@@ -1447,11 +1442,13 @@ func helpTotalLines() int {
 }
 
 func (m SftpModel) helpMaxScroll() int {
-	maxRows := m.Height - 6
-	if maxRows < 10 {
-		maxRows = 10
+	// match the geometry used in View → contentH
+	bottomH := 2 // detail + hints, conservative default
+	contentH := m.Height - bottomH
+	if contentH < 10 {
+		contentH = 10
 	}
-	visible := maxRows - 2
+	visible := contentH - 7
 	if visible < 5 {
 		visible = 5
 	}
@@ -1481,8 +1478,8 @@ func renderHelpBox(width, maxRows int, scroll *int) string {
 	}
 
 	total := len(lines)
-	// reserve 2 lines: scroll indicator + close hint
-	visible := maxRows - 2
+	// reserve rows for: border (2) + padding vert (2) + title (1) + indicator (1) + close (1) = 7
+	visible := maxRows - 7
 	if visible < 5 {
 		visible = 5
 	}
@@ -1510,7 +1507,11 @@ func renderHelpBox(width, maxRows int, scroll *int) string {
 	}
 	body += "\n" + StyleHelp.Render("press any other key to close")
 	_ = width
-	return StyleBorder.Render(centerTitle(body, "Keyboard shortcuts"))
+	innerH := maxRows - 4
+	if innerH < 6 {
+		innerH = 6
+	}
+	return StyleBorder.Height(innerH).Render(centerTitle(body, "Keyboard shortcuts"))
 }
 
 func renderConfirmBox(action string, targets []sftppkg.Entry, maxWidth int) string {
