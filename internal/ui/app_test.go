@@ -34,6 +34,27 @@ func (f *fakePass) Delete(k string) error {
 	f.delLog = append(f.delLog, k)
 	return nil
 }
+func (f *fakePass) GetPassphrase(k string) (string, error) {
+	if f.getErr != nil {
+		return "", f.getErr
+	}
+	return f.values[k+":passphrase"], nil
+}
+func (f *fakePass) SetPassphrase(k, v string) error {
+	if f.values == nil {
+		f.values = map[string]string{}
+	}
+	key := k + ":passphrase"
+	f.values[key] = v
+	f.setLog = append(f.setLog, [2]string{key, v})
+	return nil
+}
+func (f *fakePass) DeletePassphrase(k string) error {
+	key := k + ":passphrase"
+	delete(f.values, key)
+	f.delLog = append(f.delLog, key)
+	return nil
+}
 
 func TestAppRoutesNewFormMsg(t *testing.T) {
 	tmpPath := t.TempDir() + "/c.json"
@@ -85,7 +106,7 @@ func TestAppDeleteMsgRemovesConnection(t *testing.T) {
 	if len(a.Store.Connections) != 0 {
 		t.Fatalf("not deleted: %+v", a.Store)
 	}
-	if len(p.delLog) != 1 || p.delLog[0] != "ssh/a" {
+	if len(p.delLog) != 2 || p.delLog[0] != "ssh/a" || p.delLog[1] != "ssh/a:passphrase" {
 		t.Fatalf("delLog=%+v", p.delLog)
 	}
 }

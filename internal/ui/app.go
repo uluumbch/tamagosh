@@ -38,6 +38,9 @@ type PassStore interface {
 	Get(key string) (string, error)
 	Set(key, value string) error
 	Delete(key string) error
+	GetPassphrase(key string) (string, error)
+	SetPassphrase(key, value string) error
+	DeletePassphrase(key string) error
 }
 
 type AppModel struct {
@@ -145,10 +148,9 @@ func (a AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (a AppModel) handleSubmit(m FormSubmitMsg) (tea.Model, tea.Cmd) {
 	if m.IsEdit {
 		if m.Conn.Name != m.Original {
-			if err := a.Pass.Delete("ssh/" + m.Original); err != nil {
-				a.Form.Err = err.Error()
-				return a, nil
-			}
+			oldKey := "ssh/" + m.Original
+			_ = a.Pass.Delete(oldKey)
+			_ = a.Pass.DeletePassphrase(oldKey)
 			if err := a.Store.Delete(m.Original); err != nil {
 				a.Form.Err = err.Error()
 				return a, nil
@@ -163,22 +165,35 @@ func (a AppModel) handleSubmit(m FormSubmitMsg) (tea.Model, tea.Cmd) {
 				return a, nil
 			}
 		}
+	} else {
+		if err := a.Store.Add(m.Conn); err != nil {
+			a.Form.Err = err.Error()
+			return a, nil
+		}
+	}
+
+	// Persist the right secret type for the auth method; clear the other.
+	switch m.Conn.AuthMethod {
+	case "key":
+		if m.Secret.Passphrase != "" {
+			if err := a.Pass.SetPassphrase(m.Conn.PassKey, m.Secret.Passphrase); err != nil {
+				a.Form.Err = err.Error()
+				return a, nil
+			}
+		} else {
+			_ = a.Pass.DeletePassphrase(m.Conn.PassKey)
+		}
+		_ = a.Pass.Delete(m.Conn.PassKey) // clear any stale password
+	default:
 		if m.Secret.Password != "" {
 			if err := a.Pass.Set(m.Conn.PassKey, m.Secret.Password); err != nil {
 				a.Form.Err = err.Error()
 				return a, nil
 			}
 		}
-	} else {
-		if err := a.Store.Add(m.Conn); err != nil {
-			a.Form.Err = err.Error()
-			return a, nil
-		}
-		if err := a.Pass.Set(m.Conn.PassKey, m.Secret.Password); err != nil {
-			a.Form.Err = err.Error()
-			return a, nil
-		}
+		_ = a.Pass.DeletePassphrase(m.Conn.PassKey) // clear any stale passphrase
 	}
+
 	if err := config.Save(a.StorePath, a.Store); err != nil {
 		a.Form.Err = err.Error()
 		return a, nil
@@ -189,11 +204,8 @@ func (a AppModel) handleSubmit(m FormSubmitMsg) (tea.Model, tea.Cmd) {
 }
 
 func (a AppModel) confirmDelete() (tea.Model, tea.Cmd) {
-	if err := a.Pass.Delete(a.Pending.PassKey); err != nil {
-		a.List.Err = err.Error()
-		a.Mode = ModeList
-		return a, nil
-	}
+	_ = a.Pass.Delete(a.Pending.PassKey)
+	_ = a.Pass.DeletePassphrase(a.Pending.PassKey)
 	if err := a.Store.Delete(a.Pending.Name); err != nil {
 		a.List.Err = err.Error()
 		a.Mode = ModeList
@@ -208,25 +220,45 @@ func (a AppModel) confirmDelete() (tea.Model, tea.Cmd) {
 }
 
 func (a AppModel) handleConnect(c config.Connection) (tea.Model, tea.Cmd) {
-	pwd, err := a.Pass.Get(c.PassKey)
-	if err != nil {
-		a.List.Err = "pass: " + err.Error()
-		return a, nil
+	var secret string
+	switch c.AuthMethod {
+	case "key":
+		// Empty passphrase is valid (unencrypted key). Ignore lookup error.
+		if pp, err := a.Pass.GetPassphrase(c.PassKey); err == nil {
+			secret = pp
+		}
+	default:
+		pwd, err := a.Pass.Get(c.PassKey)
+		if err != nil {
+			a.List.Err = "pass: " + err.Error()
+			return a, nil
+		}
+		secret = pwd
 	}
 	a.Pending = c
 	a.Mode = ModeConnecting
 	return a, tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
-		return startSshMsg{conn: c, pwd: pwd}
+		return startSshMsg{conn: c, pwd: secret}
 	})
 }
 
 func (a AppModel) handleSftp(c config.Connection) (tea.Model, tea.Cmd) {
-	pwd, err := a.Pass.Get(c.PassKey)
-	if err != nil {
-		a.List.Err = "pass: " + err.Error()
-		return a, nil
+	auth := sftppkg.Auth{Method: c.AuthMethod}
+	switch c.AuthMethod {
+	case "key":
+		auth.KeyPath = c.KeyPath
+		if pp, err := a.Pass.GetPassphrase(c.PassKey); err == nil {
+			auth.Passphrase = pp
+		}
+	default:
+		pwd, err := a.Pass.Get(c.PassKey)
+		if err != nil {
+			a.List.Err = "pass: " + err.Error()
+			return a, nil
+		}
+		auth.Password = pwd
 	}
-	client, err := sftppkg.Connect(c, sftppkg.Auth{Method: "password", Password: pwd})
+	client, err := sftppkg.Connect(c, auth)
 	if err != nil {
 		a.List.Err = "sftp: " + err.Error()
 		return a, nil
