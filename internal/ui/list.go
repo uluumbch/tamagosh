@@ -229,5 +229,8 @@ func (m ListModel) View() string {
 		b.WriteString(lipgloss.PlaceHorizontal(targetW, lipgloss.Center, StyleError.Render(m.Err)))
 	}
 	box := StyleBorder.Render(b.String())
-	return lipgloss.JoinVertical(lipgloss.Center, renderHeader(), "", box)
+	ver := lipgloss.NewStyle().
+		Foreground(lipgloss.Color(gbFgMute)).
+		Render(buildVersion())
+	return lipgloss.JoinVertical(lipgloss.Center, renderHeader(), "", box, ver)
 }

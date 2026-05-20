@@ -2,11 +2,19 @@ package ui
 
 import (
 	"math/rand"
+	"runtime/debug"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 )
+
+func buildVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
+}
 
 const splashArtSmall = `      ██████
    ████████████

@@ -3,10 +3,12 @@ package sftp
 import (
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -23,8 +25,15 @@ type Entry struct {
 }
 
 type Client struct {
-	ssh  *ssh.Client
-	sftp *sftp.Client
+	mu     sync.RWMutex
+	ssh    *ssh.Client
+	sftp   *sftp.Client
+	done   chan struct{}
+	lostCh chan struct{}
+
+	// dial parameters retained for reconnect.
+	addr string
+	cfg  *ssh.ClientConfig
 }
 
 // Auth describes how to authenticate the SFTP session.
@@ -89,19 +98,125 @@ func Connect(c config.Connection, auth Auth) (*Client, error) {
 		Timeout:         10 * time.Second,
 	}
 	addr := fmt.Sprintf("%s:%d", c.Host, port)
-	sc, err := ssh.Dial("tcp", addr, cfg)
+	sc, fc, err := dial(addr, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("ssh dial: %w", err)
+		return nil, err
 	}
+	cl := &Client{
+		ssh:    sc,
+		sftp:   fc,
+		done:   make(chan struct{}),
+		lostCh: make(chan struct{}, 1),
+		addr:   addr,
+		cfg:    cfg,
+	}
+	go cl.keepalive()
+	return cl, nil
+}
+
+// dial opens a TCP connection with OS-level keepalive enabled (so the
+// kernel sends probes independent of Go scheduling), performs the SSH
+// handshake, and opens an SFTP subsystem channel.
+func dial(addr string, cfg *ssh.ClientConfig) (*ssh.Client, *sftp.Client, error) {
+	d := &net.Dialer{
+		Timeout:   cfg.Timeout,
+		KeepAlive: 30 * time.Second,
+	}
+	tcp, err := d.Dial("tcp", addr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("dial: %w", err)
+	}
+	sshConn, chans, reqs, err := ssh.NewClientConn(tcp, addr, cfg)
+	if err != nil {
+		_ = tcp.Close()
+		return nil, nil, fmt.Errorf("ssh handshake: %w", err)
+	}
+	sc := ssh.NewClient(sshConn, chans, reqs)
 	fc, err := sftp.NewClient(sc)
 	if err != nil {
-		sc.Close()
-		return nil, fmt.Errorf("sftp open: %w", err)
+		_ = sc.Close()
+		return nil, nil, fmt.Errorf("sftp open: %w", err)
 	}
-	return &Client{ssh: sc, sftp: fc}, nil
+	return sc, fc, nil
+}
+
+// LostCh receives a single signal each time the keepalive loop concludes
+// the SSH connection has died (3 consecutive missed probes). UI layer
+// listens and may trigger Reconnect.
+func (c *Client) LostCh() <-chan struct{} { return c.lostCh }
+
+// DoneCh closes when Close is called — lets a waitLost subscriber exit
+// cleanly instead of leaking when the session ends.
+func (c *Client) DoneCh() <-chan struct{} { return c.done }
+
+// Reconnect closes the current SSH/SFTP session and re-establishes a new
+// one using the stored dial parameters. Safe to call from a goroutine; the
+// keepalive loop tolerates the swap via the RWMutex.
+func (c *Client) Reconnect() error {
+	c.mu.Lock()
+	if c.sftp != nil {
+		_ = c.sftp.Close()
+	}
+	if c.ssh != nil {
+		_ = c.ssh.Close()
+	}
+	sc, fc, err := dial(c.addr, c.cfg)
+	if err != nil {
+		c.mu.Unlock()
+		return err
+	}
+	c.ssh = sc
+	c.sftp = fc
+	c.mu.Unlock()
+	return nil
+}
+
+// keepalive sends an OpenSSH keepalive request every 20s so NAT/firewall
+// idle timeouts don't silently drop the connection. After 3 consecutive
+// missed probes (~60s) it signals the lostCh once and keeps looping —
+// UI may call Reconnect() to swap in a fresh session under the lock.
+func (c *Client) keepalive() {
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	misses := 0
+	signaled := false
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-t.C:
+			c.mu.RLock()
+			sshc := c.ssh
+			c.mu.RUnlock()
+			if sshc == nil {
+				continue
+			}
+			_, _, err := sshc.SendRequest("keepalive@openssh.com", true, nil)
+			if err != nil {
+				misses++
+				if misses >= 3 && !signaled {
+					select {
+					case c.lostCh <- struct{}{}:
+					default:
+					}
+					signaled = true
+				}
+				continue
+			}
+			misses = 0
+			signaled = false
+		}
+	}
 }
 
 func (c *Client) Close() error {
+	if c.done != nil {
+		select {
+		case <-c.done:
+		default:
+			close(c.done)
+		}
+	}
 	if c.sftp != nil {
 		c.sftp.Close()
 	}
@@ -146,36 +261,85 @@ func (c *Client) Upload(localPath, remotePath string) error {
 	return c.UploadProgress(localPath, remotePath, nil)
 }
 
+// ErrCancelled is returned by a transfer when the caller's stop func reports true.
+var ErrCancelled = fmt.Errorf("transfer cancelled")
+
 func (c *Client) DownloadProgress(remotePath, localPath string, onBytes func(int64)) error {
+	return c.DownloadCancellable(remotePath, localPath, onBytes, nil)
+}
+
+func (c *Client) UploadProgress(localPath, remotePath string, onBytes func(int64)) error {
+	return c.UploadCancellable(localPath, remotePath, onBytes, nil)
+}
+
+func (c *Client) DownloadCancellable(remotePath, localPath string, onBytes func(int64), stop func() bool) error {
 	src, err := c.sftp.Open(remotePath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	dst, err := os.Create(localPath)
+
+	tmpPath := localPath + ".part"
+	dst, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
-	r := &progressReader{r: src, cb: onBytes}
-	_, err = io.Copy(dst, r)
-	return err
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	r := &progressReader{r: src, cb: onBytes, stop: stop}
+	if _, err := io.Copy(dst, r); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, localPath); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
-func (c *Client) UploadProgress(localPath, remotePath string, onBytes func(int64)) error {
+func (c *Client) UploadCancellable(localPath, remotePath string, onBytes func(int64), stop func() bool) error {
 	src, err := os.Open(localPath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
-	dst, err := c.sftp.Create(remotePath)
+
+	tmpPath := remotePath + ".part"
+	dst, err := c.sftp.Create(tmpPath)
 	if err != nil {
 		return err
 	}
-	defer dst.Close()
-	r := &progressReader{r: src, cb: onBytes}
-	_, err = io.Copy(dst, r)
-	return err
+	committed := false
+	defer func() {
+		if !committed {
+			_ = c.sftp.Remove(tmpPath)
+		}
+	}()
+
+	r := &progressReader{r: src, cb: onBytes, stop: stop}
+	if _, err := io.Copy(dst, r); err != nil {
+		_ = dst.Close()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	// best-effort: some SFTP servers reject overwrite-on-rename
+	_ = c.sftp.Remove(remotePath)
+	if err := c.sftp.Rename(tmpPath, remotePath); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 func (c *Client) RemoteSize(path string) (int64, error) {
@@ -245,11 +409,15 @@ func walkRemote(sc *sftp.Client, dir string, fn func(string, bool, int64) error)
 }
 
 type progressReader struct {
-	r  io.Reader
-	cb func(int64)
+	r    io.Reader
+	cb   func(int64)
+	stop func() bool
 }
 
 func (p *progressReader) Read(b []byte) (int, error) {
+	if p.stop != nil && p.stop() {
+		return 0, ErrCancelled
+	}
 	n, err := p.r.Read(b)
 	if n > 0 && p.cb != nil {
 		p.cb(int64(n))

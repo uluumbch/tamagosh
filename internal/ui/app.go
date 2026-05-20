@@ -306,7 +306,7 @@ func (a AppModel) handleSftp(c config.Connection) (tea.Model, tea.Cmd) {
 		a.Sftp.Height = a.Height
 	}
 	a.Mode = ModeSftp
-	return a, nil
+	return a, waitLost(client)
 }
 
 func (a AppModel) View() string {

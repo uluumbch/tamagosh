@@ -35,6 +35,8 @@ func BuildCommand(c config.Connection) (string, []string) {
 			"-p", portStr,
 			"-o", "StrictHostKeyChecking=accept-new",
 			"-o", "IdentitiesOnly=yes",
+			"-o", "ServerAliveInterval=60",
+			"-o", "ServerAliveCountMax=3",
 			target,
 		}
 		return sshBin, args
@@ -45,6 +47,8 @@ func BuildCommand(c config.Connection) (string, []string) {
 		sshBin,
 		"-p", portStr,
 		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "ServerAliveInterval=60",
+		"-o", "ServerAliveCountMax=3",
 		target,
 	}
 	return "sshpass", args

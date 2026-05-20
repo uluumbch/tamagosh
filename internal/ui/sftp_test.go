@@ -8,6 +8,29 @@ import (
 	"github.com/Candratama/tamagosh/internal/sftp"
 )
 
+func TestHitTestEntryMapsClickedRowToEntry(t *testing.T) {
+	m := NewSftpModel(nil, "/local", "/remote", nil, "")
+	m.Width = 100
+	m.Height = 30
+	m.LocalDir = "/local"
+	m.LocalEntries = []sftp.Entry{
+		{Name: "Downloads", IsDir: true},
+		{Name: "Library", IsDir: true},
+		{Name: "Movies", IsDir: true},
+		{Name: "Music", IsDir: true},
+	}
+	// y=0 border, y=1 title, y=2 blank, y=3 entry 0 (Downloads)
+	cases := []struct{ y, want int }{
+		{3, 0}, {4, 1}, {5, 2}, {6, 3},
+	}
+	for _, c := range cases {
+		_, idx, ok := m.hitTestEntry(2, c.y)
+		if !ok || idx != c.want {
+			t.Fatalf("y=%d idx=%d ok=%v want=%d", c.y, idx, ok, c.want)
+		}
+	}
+}
+
 func TestSftpTabSwitchesPane(t *testing.T) {
 	m := NewSftpModel(nil, "/local", "/remote", nil, "")
 	if m.Active != PaneLocal {

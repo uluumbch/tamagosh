@@ -33,6 +33,8 @@ type SftpErrorMsg struct{ Err error }
 type SftpRefreshMsg struct{}
 type sftpTickMsg struct{}
 type sftpTransferEndMsg struct{}
+type sftpConnLostMsg struct{}
+type sftpReconnectedMsg struct{ Err error }
 type editorDoneMsg struct {
 	err     error
 	pane    Pane
@@ -48,7 +50,9 @@ type transferState struct {
 	Done       atomic.Bool
 	Err        atomic.Pointer[string]
 	Scanning   atomic.Bool
+	Cancelled  atomic.Bool
 	Refresh    Pane
+	RefreshDir string
 }
 
 type SftpModel struct {
@@ -96,6 +100,35 @@ type SftpModel struct {
 	lastClickPane  Pane
 	lastClickIdx   int
 	lastClickTime  time.Time
+	Reconnecting   bool
+}
+
+// waitLost blocks in a goroutine on the client's lost channel and emits
+// sftpConnLostMsg the moment the keepalive loop declares the SSH session
+// dead. Re-subscribe after every reconnect to catch the next failure.
+func waitLost(c *sftppkg.Client) tea.Cmd {
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-c.LostCh():
+			return sftpConnLostMsg{}
+		case <-c.DoneCh():
+			// session closed cleanly — no further action.
+			return nil
+		}
+	}
+}
+
+func doReconnect(c *sftppkg.Client) tea.Cmd {
+	if c == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		err := c.Reconnect()
+		return sftpReconnectedMsg{Err: err}
+	}
 }
 
 const (
@@ -360,6 +393,25 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshLocal()
 		m.refreshRemote()
 		return m, nil
+	case sftpConnLostMsg:
+		if m.Reconnecting {
+			return m, nil
+		}
+		m.Reconnecting = true
+		m.Err = ""
+		m.Info = "connection lost — reconnecting…"
+		return m, doReconnect(m.Client)
+	case sftpReconnectedMsg:
+		m.Reconnecting = false
+		if msg.Err != nil {
+			m.Err = "reconnect failed: " + msg.Err.Error()
+			m.Info = ""
+			return m, waitLost(m.Client)
+		}
+		m.Err = ""
+		m.Info = "reconnected"
+		m.refreshRemote()
+		return m, waitLost(m.Client)
 	case sftpTickMsg:
 		if m.Transfer == nil {
 			return m, nil
@@ -370,11 +422,15 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.Info = fmt.Sprintf("copied %d file(s)", m.Transfer.FileTotal.Load())
 				m.clearSelection()
-				if m.Transfer.Refresh == PaneRemote {
-					m.refreshRemote()
-				} else {
-					m.refreshLocal()
-				}
+			}
+			// refresh destination pane only if user is still viewing the
+			// target dir; otherwise the snapshot is stale and refreshing
+			// the current view would be misleading.
+			refreshDir := m.Transfer.RefreshDir
+			if m.Transfer.Refresh == PaneRemote && m.RemoteDir == refreshDir {
+				m.refreshRemote()
+			} else if m.Transfer.Refresh == PaneLocal && m.LocalDir == refreshDir {
+				m.refreshLocal()
 			}
 			return m, tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
 				return sftpTransferEndMsg{}
@@ -403,6 +459,32 @@ func (m SftpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.ClearScreen
 	case tea.KeyMsg:
+		if m.Reconnecting {
+			// allow only quit while we redial
+			if msg.Type == tea.KeyRunes && string(msg.Runes) == "q" {
+				return m, func() tea.Msg { return SftpQuitMsg{} }
+			}
+			return m, nil
+		}
+		if m.TransferActive {
+			// block all input except cancel during a transfer
+			if msg.Type == tea.KeyEsc {
+				if m.Transfer != nil {
+					m.Transfer.Cancelled.Store(true)
+				}
+				return m, nil
+			}
+			if msg.Type == tea.KeyRunes {
+				switch string(msg.Runes) {
+				case "x", "X", "c", "C":
+					if m.Transfer != nil {
+						m.Transfer.Cancelled.Store(true)
+					}
+					return m, nil
+				}
+			}
+			return m, nil
+		}
 		if m.ShowInfo {
 			m.ShowInfo = false
 			return m, nil
@@ -953,12 +1035,18 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 	if m.Client == nil || len(targets) == 0 {
 		return nil
 	}
+	if m.TransferActive {
+		// prevent overlapping transfers — would orphan the previous goroutine
+		return nil
+	}
 
 	ts := &transferState{}
 	if m.Active == PaneLocal {
 		ts.Refresh = PaneRemote
+		ts.RefreshDir = m.RemoteDir
 	} else {
 		ts.Refresh = PaneLocal
+		ts.RefreshDir = m.LocalDir
 	}
 	ts.Scanning.Store(true)
 
@@ -990,8 +1078,15 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 		ts.FileName.Store(&first)
 		ts.Scanning.Store(false)
 
+		stop := func() bool { return ts.Cancelled.Load() }
 		queue := items
 		for i, it := range queue {
+			if ts.Cancelled.Load() {
+				msg := "cancelled"
+				ts.Err.Store(&msg)
+				ts.Done.Store(true)
+				return
+			}
 			name := it.relPath
 			ts.FileName.Store(&name)
 			ts.FileIdx.Store(int32(i + 1))
@@ -1016,14 +1111,17 @@ func (m *SftpModel) startCopy(targets []sftppkg.Entry) tea.Cmd {
 			} else if dir == PaneLocal {
 				src := filepath.Join(localDir, it.relPath)
 				dst := sftppkg.Join(remoteDir, it.relPath)
-				err = client.UploadProgress(src, dst, cb)
+				err = client.UploadCancellable(src, dst, cb, stop)
 			} else {
 				src := sftppkg.Join(remoteDir, it.relPath)
 				dst := filepath.Join(localDir, it.relPath)
-				err = client.DownloadProgress(src, dst, cb)
+				err = client.DownloadCancellable(src, dst, cb, stop)
 			}
 			if err != nil {
 				es := err.Error()
+				if errors.Is(err, sftppkg.ErrCancelled) || ts.Cancelled.Load() {
+					es = "cancelled"
+				}
 				ts.Err.Store(&es)
 				ts.Done.Store(true)
 				return
@@ -1108,34 +1206,12 @@ func (m SftpModel) View() string {
 	}
 
 	help := hints
-	if m.TransferActive && m.Transfer != nil {
-		done := m.Transfer.BytesDone.Load()
-		total := m.Transfer.BytesTotal.Load()
-		idx := m.Transfer.FileIdx.Load()
-		tot := m.Transfer.FileTotal.Load()
-		if m.Transfer.Scanning.Load() {
-			name := "scanning…"
-			if p := m.Transfer.FileName.Load(); p != nil && *p != "" {
-				name = *p
-			}
-			help = StyleSelected.Render("scanning tree: "+name) + "\n" + help
-		} else {
-			name := ""
-			if p := m.Transfer.FileName.Load(); p != nil {
-				name = *p
-			}
-			pct := 0
-			if total > 0 {
-				pct = int(done * 100 / total)
-				if pct > 100 {
-					pct = 100
-				}
-			}
-			bar := transferBar(done, total, 24)
-			status := fmt.Sprintf("transferring %d/%d  %s  %d%%  %s/%s  %s",
-				idx, tot, bar, pct, humanSize(done), humanSize(total), truncateMiddle(name, 30))
-			help = StyleSelected.Render(status) + "\n" + help
-		}
+	if m.Reconnecting {
+		banner := lipgloss.NewStyle().
+			Foreground(lipgloss.Color(gbYellow)).
+			Bold(true).
+			Render("⟳ reconnecting…  [q] cancel")
+		help = banner + "\n" + help
 	} else if m.Err != "" {
 		help = StyleError.Render(m.Err) + "\n" + help
 	} else if m.Info != "" {
@@ -1167,6 +1243,8 @@ func (m SftpModel) View() string {
 
 	var overlay string
 	switch {
+	case m.TransferActive && m.Transfer != nil:
+		overlay = renderTransferBox(m.Transfer, min(boxW, 60))
 	case m.ShowHelp:
 		overlay = renderHelpBox(min(m.Width-4, 78), contentH, &m.HelpScroll)
 	case m.ShowInfo:
@@ -1212,14 +1290,15 @@ func (m SftpModel) hitTestEntry(x, y int) (Pane, int, bool) {
 		return pane, 0, false
 	}
 
-	if y < 1 {
+	// Pane render layout (screen rows):
+	//   y=0           top border
+	//   y=1           title
+	//   y=2           blank line (from "\n\n" after title in renderPane)
+	//   y=3..         entry 0, 1, 2, ...
+	if y < 3 {
 		return pane, 0, false
 	}
-	contentRow := y - 1
-	if contentRow < 1 {
-		return pane, 0, false
-	}
-	entryRow := contentRow - 1
+	entryRow := y - 3
 
 	var scroll int
 	var entries []sftppkg.Entry
@@ -1238,6 +1317,13 @@ func (m SftpModel) hitTestEntry(x, y int) (Pane, int, bool) {
 }
 
 func (m SftpModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.Reconnecting {
+		return m, nil
+	}
+	if m.TransferActive {
+		// block all mouse input during transfer (cancel via keyboard)
+		return m, nil
+	}
 	if m.ShowHelp {
 		ms := m.helpMaxScroll()
 		switch msg.Button {
@@ -1296,7 +1382,7 @@ func (m SftpModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.RemoteCursor = idx
 		}
 		m.clampScroll()
-		if m.lastClickPane == pane && m.lastClickIdx == idx && time.Since(m.lastClickTime) < 500*time.Millisecond {
+		if m.lastClickPane == pane && m.lastClickIdx == idx && time.Since(m.lastClickTime) < 700*time.Millisecond {
 			m.descend()
 			m.clampScroll()
 			m.lastClickTime = time.Time{}
@@ -1666,7 +1752,7 @@ func transferBar(done, total int64, width int) string {
 		return ""
 	}
 	if total <= 0 {
-		return "[" + strings.Repeat("-", width) + "]"
+		return strings.Repeat("░", width)
 	}
 	filled := int(done * int64(width) / total)
 	if filled > width {
@@ -1675,7 +1761,72 @@ func transferBar(done, total int64, width int) string {
 	if filled < 0 {
 		filled = 0
 	}
-	return "[" + strings.Repeat("=", filled) + strings.Repeat("-", width-filled) + "]"
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func renderTransferBox(ts *transferState, maxWidth int) string {
+	if ts == nil {
+		return ""
+	}
+	innerW := maxWidth - 6
+	if innerW < 24 {
+		innerW = 24
+	}
+	if innerW > 60 {
+		innerW = 60
+	}
+	barW := innerW
+
+	var b strings.Builder
+	if ts.Scanning.Load() {
+		name := "scanning…"
+		if p := ts.FileName.Load(); p != nil && *p != "" {
+			name = *p
+		}
+		b.WriteString(StyleHelp.Render("scanning tree"))
+		b.WriteString("\n")
+		b.WriteString(StyleNormal.Render(truncateMiddle(name, innerW)))
+		b.WriteString("\n\n")
+		b.WriteString(StyleHelp.Render(strings.Repeat("░", barW)))
+		b.WriteString("\n\n")
+	} else {
+		done := ts.BytesDone.Load()
+		total := ts.BytesTotal.Load()
+		idx := ts.FileIdx.Load()
+		tot := ts.FileTotal.Load()
+		pct := 0
+		if total > 0 {
+			pct = int(done * 100 / total)
+			if pct > 100 {
+				pct = 100
+			}
+		}
+		name := ""
+		if p := ts.FileName.Load(); p != nil {
+			name = *p
+		}
+		b.WriteString(StyleHelp.Render(fmt.Sprintf("file %d / %d", idx, tot)))
+		b.WriteString("\n")
+		b.WriteString(StyleNormal.Render(truncateMiddle(name, innerW)))
+		b.WriteString("\n\n")
+		b.WriteString(StyleSuccess.Render(transferBar(done, total, barW)))
+		b.WriteString("\n")
+		b.WriteString(StyleNormal.Render(fmt.Sprintf("%d%%   %s / %s", pct, humanSize(done), humanSize(total))))
+		b.WriteString("\n\n")
+	}
+	if ts.Cancelled.Load() {
+		b.WriteString(StyleError.Render("cancelling…"))
+	} else {
+		b.WriteString(StyleKeyBracket.Render("["))
+		b.WriteString(StyleError.Render("x"))
+		b.WriteString(StyleKeyBracket.Render("] "))
+		b.WriteString(StyleKeyLabel.Render("cancel  "))
+		b.WriteString(StyleKeyBracket.Render("["))
+		b.WriteString(StyleKey.Render("Esc"))
+		b.WriteString(StyleKeyBracket.Render("] "))
+		b.WriteString(StyleKeyLabel.Render("cancel"))
+	}
+	return StyleBorder.Render(centerTitle(b.String(), "Transferring"))
 }
 
 func paneLabel(p Pane) string {
