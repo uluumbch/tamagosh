@@ -86,22 +86,46 @@ Key names must match `[a-zA-Z0-9_][a-zA-Z0-9._-]*` — no path separators, no `.
 
 ## Install
 
-You need **Go 1.22+**. You also need `sshpass` **only if you plan to use password authentication**. SSH key auth works without it.
+Tamagosh is a single static binary — pick whichever route you like. You also need `sshpass` **only if you plan to use password authentication**. SSH key auth works without it.
 
 ```bash
-# 1. install sshpass (macOS)
+# install sshpass (macOS)
 brew install hudochenkov/sshpass/sshpass
 
-# 1. install sshpass (Linux)
+# install sshpass (Linux)
 sudo apt install sshpass        # Debian/Ubuntu
 sudo pacman -S sshpass          # Arch
 sudo dnf install sshpass        # Fedora
-
-# 2. install tamagosh
-go install github.com/Candratama/tamagosh@latest
 ```
 
 > Skipping `sshpass` is fine if you'll only use SSH keys — tamagosh will print a one-line note on startup and key-auth connections will keep working.
+
+### Option A — download a prebuilt binary (no Go required)
+
+Grab the tarball for your platform from the [releases page](https://github.com/Candratama/tamagosh/releases/latest) — `darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac), `linux-amd64`, or `linux-arm64` — then:
+
+```bash
+# example: Apple Silicon Mac
+curl -LO https://github.com/Candratama/tamagosh/releases/latest/download/tamagosh-darwin-arm64.tar.gz
+tar -xzf tamagosh-darwin-arm64.tar.gz
+sudo mv tamagosh /usr/local/bin/
+```
+
+On macOS, if you downloaded through a **browser** instead of `curl`, Gatekeeper quarantines the file and refuses to run it ("cannot verify the developer"). Clear the flag once:
+
+```bash
+xattr -d com.apple.quarantine /usr/local/bin/tamagosh
+```
+
+You can also grab bleeding-edge builds from any [Actions run](../../actions): download the artifact for your platform, unzip it, then `chmod +x` the binary (artifact zips drop the executable bit) and apply the same `xattr` fix.
+
+### Option B — build from source with Go
+
+You need **Go 1.22+**.
+
+```bash
+go install github.com/Candratama/tamagosh@latest
+```
 
 Make sure `~/go/bin` is in your `PATH`:
 
@@ -119,6 +143,10 @@ tamagosh
 That's it. First run creates `~/.config/tamagosh/` automatically with a fresh encryption key.
 
 ### Updating
+
+Prebuilt binary: re-download the latest tarball from the [releases page](https://github.com/Candratama/tamagosh/releases/latest) and replace the old binary.
+
+From source:
 
 ```bash
 go install github.com/Candratama/tamagosh@latest
